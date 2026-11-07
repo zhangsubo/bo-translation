@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { EyeOff, Settings, Sparkles } from 'lucide-react';
+import { Ban, Code2, EyeOff, Settings, Sparkles } from 'lucide-react';
 import {
   matchSiteRule,
   resolvePrimaryService,
@@ -14,6 +14,7 @@ import type {
   TranslationStylePreset,
 } from '../../../src/types';
 import type { PageTranslationController } from '../dom/controller';
+import { isGitHubCodeHost } from '../dom/github-comments';
 
 interface FloatingTabProps {
   controller: PageTranslationController;
@@ -78,6 +79,7 @@ export const FloatingTab: React.FC<FloatingTabProps> = ({
   const enabledServices = settings.services.filter((s) => s.enabled);
   const activeService = resolvePrimaryService(settings);
   const isActive = tabState.mode !== 'original';
+  const isGitHub = isGitHubCodeHost(hostname);
 
   const handleMouseEnter = () => {
     if (closeTimerRef.current) {
@@ -157,6 +159,38 @@ export const FloatingTab: React.FC<FloatingTabProps> = ({
       const idx = prev.siteRules.findIndex((r) => r.pattern === hostname);
       const nextAction =
         currentRule?.action === 'always-bilingual' ? 'none' : 'always-bilingual';
+
+      if (idx >= 0) {
+        return {
+          ...prev,
+          siteRules: prev.siteRules.map((r, i) =>
+            i === idx ? { ...r, action: nextAction, enabled: true } : r,
+          ),
+        };
+      }
+
+      return {
+        ...prev,
+        siteRules: [
+          {
+            id: `rule_${ Date.now() }`,
+            pattern: hostname,
+            action: nextAction,
+            hideFloatingTab: false,
+            enabled: true,
+          },
+          ...prev.siteRules,
+        ],
+      };
+    });
+  };
+
+  const handleToggleNeverDomain = async () => {
+    if (!hostname) return;
+    await updateSettings((prev) => {
+      const idx = prev.siteRules.findIndex((r) => r.pattern === hostname);
+      const nextAction =
+        currentRule?.action === 'never-translate' ? 'none' : 'never-translate';
 
       if (idx >= 0) {
         return {
@@ -289,6 +323,20 @@ export const FloatingTab: React.FC<FloatingTabProps> = ({
           <div className="bo-field-row">
             <div className="bo-field-label">
               <span>译文呈现样式</span>
+              <button
+                type="button"
+                className="bo-ghost-btn"
+                style={{ fontSize: '11px', padding: '1px 5px' }}
+                title="切换智能对比度配色与原色对照"
+                onClick={() =>
+                  updateSettings({
+                    colorMode:
+                      settings.colorMode === 'adaptive' ? 'inherit' : 'adaptive',
+                  })
+                }
+              >
+                {settings.colorMode === 'adaptive' ? '🎨 智能双色' : '◐ 原色对照'}
+              </button>
             </div>
             <div className="bo-style-grid">
               {STYLE_PRESET_OPTIONS.map((opt) => (
@@ -308,26 +356,80 @@ export const FloatingTab: React.FC<FloatingTabProps> = ({
             </div>
           </div>
 
+          {isGitHub && (
+            <div className="bo-field-row">
+              <button
+                type="button"
+                className="bo-chip-btn"
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '5px',
+                }}
+                data-active={
+                  settings.enableGithubCommentTranslation ? 'true' : 'false'
+                }
+                onClick={() =>
+                  updateSettings({
+                    enableGithubCommentTranslation:
+                      !settings.enableGithubCommentTranslation,
+                  })
+                }
+              >
+                <Code2 size={12} />
+                <span>
+                  {settings.enableGithubCommentTranslation
+                    ? '已开启代码行内注释翻译'
+                    : '开启代码行内注释翻译'}
+                </span>
+              </button>
+            </div>
+          )}
+
           <div className="bo-panel-footer">
-            <button
-              type="button"
-              className="bo-ghost-btn"
-              style={{
-                color:
-                  currentRule?.action === 'always-bilingual'
-                    ? 'var(--bo-accent)'
-                    : undefined,
-              }}
-              onClick={handleToggleAlwaysDomain}
-              title="下次打开该域名时自动开启双语对照"
-            >
-              <Sparkles size={12} />
-              <span>
-                {currentRule?.action === 'always-bilingual'
-                  ? '已设自动双语'
-                  : '此站自动双语'}
-              </span>
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <button
+                type="button"
+                className="bo-ghost-btn"
+                style={{
+                  color:
+                    currentRule?.action === 'always-bilingual'
+                      ? 'var(--bo-accent)'
+                      : undefined,
+                }}
+                onClick={handleToggleAlwaysDomain}
+                title="下次打开该域名时自动开启双语对照"
+              >
+                <Sparkles size={12} />
+                <span>
+                  {currentRule?.action === 'always-bilingual'
+                    ? '已自动'
+                    : '自动双语'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                className="bo-ghost-btn"
+                style={{
+                  color:
+                    currentRule?.action === 'never-translate'
+                      ? '#f59e0b'
+                      : undefined,
+                }}
+                onClick={handleToggleNeverDomain}
+                title="一键将此域名加入免译名单"
+              >
+                <Ban size={12} />
+                <span>
+                  {currentRule?.action === 'never-translate'
+                    ? '已免译'
+                    : '此站免译'}
+                </span>
+              </button>
+            </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
               <button
@@ -342,9 +444,11 @@ export const FloatingTab: React.FC<FloatingTabProps> = ({
                 type="button"
                 className="bo-ghost-btn"
                 title="打开翻译与术语设置中心"
-                onClick={() =>
-                  chrome.runtime.sendMessage({ type: 'OPEN_OPTIONS_PAGE' })
-                }
+                onClick={() => {
+                  chrome.runtime
+                    .sendMessage({ type: 'OPEN_OPTIONS_PAGE' })
+                    .catch(() => {});
+                }}
               >
                 <Settings size={13} />
               </button>

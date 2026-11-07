@@ -78,6 +78,16 @@ export function normalizeSettings(
       ...DEFAULT_SETTINGS.floatingTab,
       ...(raw.floatingTab ?? {}),
     },
+    videoSubtitle: (() => {
+      const merged = {
+        ...DEFAULT_SETTINGS.videoSubtitle,
+        ...(raw.videoSubtitle ?? {}),
+      };
+      if (!merged.advancedTimelineUnlocked) {
+        merged.enableActiveTimelineFetch = false;
+      }
+      return merged;
+    })(),
     services,
     glossary: Array.isArray(raw.glossary)
       ? raw.glossary
@@ -191,6 +201,15 @@ export function resolveSelectionService(settings: ExtensionSettings): ServicePro
     const custom = settings.services.find(
       (s) => s.id === settings.selectionServiceId && s.enabled,
     );
+    if (custom) return custom;
+  }
+  return resolvePrimaryService(settings);
+}
+
+export function resolveSubtitleService(settings: ExtensionSettings): ServiceProfile {
+  const subId = settings.videoSubtitle?.subtitleServiceId;
+  if (subId && subId !== 'follow-primary') {
+    const custom = settings.services.find((s) => s.id === subId && s.enabled);
     if (custom) return custom;
   }
   return resolvePrimaryService(settings);

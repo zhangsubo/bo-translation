@@ -1,16 +1,22 @@
-import { STREAM_PORT_NAME } from '../../background';
+import {
+  detectIsForeignPage,
+  sampleReadablePageText,
+} from '../../../src/auto-translate/detector';
 import {
   matchSiteRule,
   resolvePrimaryService,
 } from '../../../src/storage';
-import type {
-  ExtensionSettings,
-  PageTabState,
-  PageViewMode,
-  StreamPortClientMessage,
-  StreamPortServerMessage,
-} from '../../../src/types';
 import {
+  STREAM_PORT_NAME,
+  type ExtensionSettings,
+  type PageTabState,
+  type PageViewMode,
+  type StreamPortClientMessage,
+  type StreamPortServerMessage,
+} from '../../../src/types';
+import { consumeRuntimeLastError } from '../../../src/utils/runtime';
+import {
+  applySegmentColorMode,
   applyViewModeToSegment,
   ensureHostStyleSheet,
   isIgnoredSelfMutation,
@@ -25,6 +31,7 @@ import {
   discoverCandidateElements,
   extractTranslatableSegmentsFromElement,
   findHoverTargetElement,
+  type ScanOptions,
 } from './scanner';
 
 export interface HoveredSegmentInfo {
@@ -68,42 +75,249 @@ export class PageTranslationController {
   private lastHoverToggledEl: HTMLElement | null = null;
   private hoveredSegId: number | null = null;
 
+  /** Smart foreign-page auto-translation state machine */
+  private lastRouteKey = '';
+  private userRestoredRouteKey: string | null = null;
+  private checkedNonForeignRouteKey: string | null = null;
+  private autoCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
   constructor(initialSettings: ExtensionSettings) {
     this.settings = initialSettings;
   }
 
+  private getRouteKey(): string {
+    return `${ window.location.origin }${ window.location.pathname }${ window.location.search }${ window.location.hash }`;
+  }
+
+  private getScanOptions(): ScanOptions {
+    return {
+      hostname: window.location.hostname,
+      siteRule: matchSiteRule(window.location.hostname, this.settings.siteRules),
+      targetLang: this.settings.targetLang,
+      enableGithubComments: this.settings.enableGithubCommentTranslation,
+    };
+  }
+
   init(): void {
+    this.lastRouteKey = this.getRouteKey();
     ensureHostStyleSheet(
       document,
       this.settings.stylePreset,
       this.settings.fontScale,
+      this.settings.colorMode,
     );
     document.documentElement.setAttribute('data-bo-view', this.mode);
 
     this.setupIntersectionObserver();
     this.setupMutationObserver();
     this.setupHoverAndHoldListeners();
+    this.setupAutoTranslateListeners();
 
-    // Apply initial domain site rule after hydration settles
-    const matchedRule = matchSiteRule(
-      window.location.hostname,
-      this.settings.siteRules,
-    );
-    if (matchedRule?.action === 'always-bilingual') {
-      setTimeout(() => this.setMode('bilingual'), 280);
-    } else if (matchedRule?.action === 'always-translated-only') {
-      setTimeout(() => this.setMode('translated-only'), 280);
-    }
+    // Schedule initial domain rule & smart foreign-page check after hydration settles
+    this.scheduleAutoTranslationCheck(280);
   }
 
   updateSettings(next: ExtensionSettings): void {
     const prevStyle = this.settings.stylePreset;
     const prevScale = this.settings.fontScale;
+    const prevColorMode = this.settings.colorMode;
+    const prevGithubComments = this.settings.enableGithubCommentTranslation;
+    const prevAutoTranslate = this.settings.autoTranslateForeignPages;
+    const prevSiteRules = this.settings.siteRules;
     this.settings = next;
 
-    if (prevStyle !== next.stylePreset || prevScale !== next.fontScale) {
-      ensureHostStyleSheet(document, next.stylePreset, next.fontScale);
+    if (
+      prevStyle !== next.stylePreset ||
+      prevScale !== next.fontScale ||
+      prevColorMode !== next.colorMode
+    ) {
+      ensureHostStyleSheet(
+        document,
+        next.stylePreset,
+        next.fontScale,
+        next.colorMode,
+      );
+      if (prevColorMode !== next.colorMode) {
+        for (const handle of this.segments.values()) {
+          applySegmentColorMode(handle, next.colorMode);
+        }
+      }
     }
+
+    if (prevGithubComments !== next.enableGithubCommentTranslation) {
+      if (!next.enableGithubCommentTranslation) {
+        for (const handle of this.segments.values()) {
+          if (handle.codeCommentMeta) {
+            handle.manualHoverVisible = false;
+            applyViewModeToSegment(handle, 'original');
+          }
+        }
+      } else if (this.mode !== 'original') {
+        this.scanAndObserveRoot(document);
+      }
+    }
+
+    const matchedRule = matchSiteRule(window.location.hostname, next.siteRules);
+    if (matchedRule?.action === 'never-translate' && this.mode !== 'original') {
+      this.setMode('original', { source: 'auto' });
+      return;
+    }
+
+    if (
+      prevAutoTranslate !== next.autoTranslateForeignPages ||
+      prevSiteRules !== next.siteRules
+    ) {
+      this.checkedNonForeignRouteKey = null;
+      this.scheduleAutoTranslationCheck(60);
+    }
+  }
+
+  private setupAutoTranslateListeners(): void {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'hidden' && this.mode === 'original') {
+        this.scheduleAutoTranslationCheck(120);
+      }
+    });
+
+    const onRouteEvent = () => {
+      const nextKey = this.getRouteKey();
+      if (nextKey !== this.lastRouteKey) {
+        this.lastRouteKey = nextKey;
+        this.userRestoredRouteKey = null;
+        this.checkedNonForeignRouteKey = null;
+        if (this.mode === 'original') {
+          this.scheduleAutoTranslationCheck(260);
+        }
+      }
+    };
+
+    window.addEventListener('popstate', onRouteEvent);
+    window.addEventListener('hashchange', onRouteEvent);
+
+    // Proactively close open extension Port before page enters BFCache
+    window.addEventListener('pagehide', () => {
+      if (this.port) {
+        const activePort = this.port;
+        this.port = null;
+        this.activeBatchRequests.clear();
+        this.inFlightSegmentIds.clear();
+        try {
+          activePort.disconnect();
+        } catch {
+          // ignore already closed port
+        }
+        this.emitState();
+      }
+    });
+
+    // Resume any interrupted in-flight segments when restored from BFCache
+    window.addEventListener('pageshow', (e) => {
+      if (!e.persisted || this.mode === 'original') return;
+      for (const handle of this.segments.values()) {
+        if (handle.state === 'loading' || handle.state === 'streaming') {
+          this.enqueueSegmentForBatch(handle);
+        }
+      }
+    });
+  }
+
+  private scheduleAutoTranslationCheck(delayMs = 260): void {
+    if (this.autoCheckTimer) {
+      clearTimeout(this.autoCheckTimer);
+    }
+    this.autoCheckTimer = setTimeout(() => {
+      this.autoCheckTimer = null;
+      void this.evaluateAutoTranslation();
+    }, delayMs);
+  }
+
+  private isDocumentHidden(): boolean {
+    return document.visibilityState === 'hidden';
+  }
+
+  /**
+   * Non-intrusive smart foreign-page & site-rule auto-translation evaluator:
+   * - Respects `never-translate` site rule
+   * - Defers execution while `document.visibilityState === 'hidden'` (lazy start on tab focus)
+   * - Latches per-URL when user explicitly restores `'original'` so DOM mutations never override user choice
+   */
+  async evaluateAutoTranslation(): Promise<boolean> {
+    const routeKey = this.getRouteKey();
+    if (this.lastRouteKey && this.lastRouteKey !== routeKey) {
+      this.userRestoredRouteKey = null;
+      this.checkedNonForeignRouteKey = null;
+    }
+    this.lastRouteKey = routeKey;
+
+    const matchedRule = matchSiteRule(
+      window.location.hostname,
+      this.settings.siteRules,
+    );
+    if (matchedRule?.action === 'never-translate') {
+      return false;
+    }
+
+    if (this.isDocumentHidden()) {
+      return false;
+    }
+
+    if (this.userRestoredRouteKey === routeKey) {
+      return false;
+    }
+
+    if (this.mode !== 'original') {
+      return false;
+    }
+
+    if (matchedRule?.action === 'always-bilingual') {
+      this.setMode('bilingual', { source: 'auto' });
+      return true;
+    }
+    if (matchedRule?.action === 'always-translated-only') {
+      this.setMode('translated-only', { source: 'auto' });
+      return true;
+    }
+
+    if (!this.settings.autoTranslateForeignPages) {
+      return false;
+    }
+
+    if (this.checkedNonForeignRouteKey === routeKey) {
+      return false;
+    }
+
+    const sampleText = sampleReadablePageText(document);
+    if (sampleText.length < 40) {
+      return false;
+    }
+
+    const isForeign = await detectIsForeignPage({
+      sampleText,
+      htmlLang: document.documentElement.lang || '',
+      targetLang: this.settings.targetLang,
+    });
+
+    // Re-check invariants after async language detection
+    if (
+      this.mode !== 'original' ||
+      this.getRouteKey() !== routeKey ||
+      this.userRestoredRouteKey === routeKey ||
+      this.isDocumentHidden() ||
+      matchSiteRule(window.location.hostname, this.settings.siteRules)?.action ===
+        'never-translate'
+    ) {
+      return false;
+    }
+
+    if (isForeign) {
+      this.setMode('bilingual', { source: 'auto' });
+      return true;
+    }
+
+    if (sampleText.length >= 280) {
+      this.checkedNonForeignRouteKey = routeKey;
+    }
+    return false;
   }
 
   getSettings(): ExtensionSettings {
@@ -160,18 +374,28 @@ export class PageTranslationController {
   toggleBilingual(): PageViewMode {
     const next: PageViewMode =
       this.mode === 'original' ? 'bilingual' : 'original';
-    this.setMode(next);
+    this.setMode(next, { source: 'user' });
     return next;
   }
 
   toggleTranslatedOnly(): PageViewMode {
     const next: PageViewMode =
       this.mode === 'translated-only' ? 'bilingual' : 'translated-only';
-    this.setMode(next);
+    this.setMode(next, { source: 'user' });
     return next;
   }
 
-  setMode(nextMode: PageViewMode): void {
+  setMode(
+    nextMode: PageViewMode,
+    options?: { source?: 'user' | 'auto' },
+  ): void {
+    const source = options?.source ?? 'user';
+    if (nextMode === 'original' && source === 'user' && this.mode !== 'original') {
+      this.userRestoredRouteKey = this.getRouteKey();
+    } else if (nextMode !== 'original' && source === 'user') {
+      this.userRestoredRouteKey = null;
+    }
+
     if (this.mode === nextMode) return;
     this.mode = nextMode;
     document.documentElement.setAttribute('data-bo-view', nextMode);
@@ -199,9 +423,16 @@ export class PageTranslationController {
       document,
       this.settings.stylePreset,
       this.settings.fontScale,
+      this.settings.colorMode,
     );
 
     for (const handle of this.segments.values()) {
+      if (
+        handle.codeCommentMeta &&
+        !this.settings.enableGithubCommentTranslation
+      ) {
+        continue;
+      }
       applyViewModeToSegment(handle, nextMode);
       // Re-enqueue segments that were cancelled while still loading
       if (handle.state === 'loading' && !this.inFlightSegmentIds.has(handle.id)) {
@@ -232,11 +463,10 @@ export class PageTranslationController {
       this.retranslateSegment(this.hoveredSegId);
       return true;
     }
-    const targetEl = findHoverTargetElement(this.lastMouseClient.target, {
-      hostname: window.location.hostname,
-      siteRule: matchSiteRule(window.location.hostname, this.settings.siteRules),
-      targetLang: this.settings.targetLang,
-    });
+    const targetEl = findHoverTargetElement(
+      this.lastMouseClient.target,
+      this.getScanOptions(),
+    );
     if (!targetEl) return false;
     const ids = this.hostToSegIds.get(targetEl);
     if (ids && ids.length > 0) {
@@ -321,7 +551,24 @@ export class PageTranslationController {
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
     this.mutationObserver = new MutationObserver((records) => {
-      if (this.mode === 'original') return;
+      const currentRoute = this.getRouteKey();
+      if (currentRoute !== this.lastRouteKey) {
+        this.lastRouteKey = currentRoute;
+        this.userRestoredRouteKey = null;
+        this.checkedNonForeignRouteKey = null;
+      }
+
+      if (this.mode === 'original') {
+        if (
+          this.settings.autoTranslateForeignPages &&
+          this.userRestoredRouteKey !== currentRoute &&
+          this.checkedNonForeignRouteKey !== currentRoute &&
+          document.visibilityState !== 'hidden'
+        ) {
+          this.scheduleAutoTranslationCheck(360);
+        }
+        return;
+      }
 
       for (const rec of records) {
         if (isIgnoredSelfMutation(rec)) continue;
@@ -364,15 +611,7 @@ export class PageTranslationController {
   }
 
   private scanAndObserveRoot(root: Element | Document): void {
-    const siteRule = matchSiteRule(
-      window.location.hostname,
-      this.settings.siteRules,
-    );
-    const candidates = discoverCandidateElements(root, {
-      hostname: window.location.hostname,
-      siteRule,
-      targetLang: this.settings.targetLang,
-    });
+    const candidates = discoverCandidateElements(root, this.getScanOptions());
 
     for (const el of candidates) {
       if (this.observedHosts.has(el)) continue;
@@ -393,15 +632,10 @@ export class PageTranslationController {
     hostEl: HTMLElement,
     manualHover: boolean,
   ): RenderedSegmentHandle[] {
-    const siteRule = matchSiteRule(
-      window.location.hostname,
-      this.settings.siteRules,
+    const discovered = extractTranslatableSegmentsFromElement(
+      hostEl,
+      this.getScanOptions(),
     );
-    const discovered = extractTranslatableSegmentsFromElement(hostEl, {
-      hostname: window.location.hostname,
-      siteRule,
-      targetLang: this.settings.targetLang,
-    });
 
     if (discovered.length === 0) return [];
 
@@ -418,6 +652,8 @@ export class PageTranslationController {
         serialized: seg.serialized,
         isShortInline: seg.isShortInline,
         targetLang: this.settings.targetLang,
+        colorMode: this.settings.colorMode,
+        codeCommentMeta: seg.codeCommentMeta,
         onRetryClick: (retryId) => this.retranslateSegment(retryId),
       });
       handle.manualHoverVisible = manualHover;
@@ -528,6 +764,7 @@ export class PageTranslationController {
     });
 
     port.onDisconnect.addListener(() => {
+      consumeRuntimeLastError();
       this.port = null;
       this.activeBatchRequests.clear();
       this.inFlightSegmentIds.clear();
@@ -763,14 +1000,10 @@ export class PageTranslationController {
 
         // Modifier + Hover trigger in original mode
         if (this.mode === 'original' && this.isHoverModifierPressed(e)) {
-          const candidate = findHoverTargetElement(e.target, {
-            hostname: window.location.hostname,
-            siteRule: matchSiteRule(
-              window.location.hostname,
-              this.settings.siteRules,
-            ),
-            targetLang: this.settings.targetLang,
-          });
+          const candidate = findHoverTargetElement(
+            e.target,
+            this.getScanOptions(),
+          );
           if (candidate && candidate !== this.lastHoverToggledEl) {
             this.lastHoverToggledEl = candidate;
             this.toggleSingleHostElement(candidate);
@@ -813,14 +1046,10 @@ export class PageTranslationController {
       }
 
       if (this.mode === 'original' && this.lastMouseClient.target) {
-        const candidate = findHoverTargetElement(this.lastMouseClient.target, {
-          hostname: window.location.hostname,
-          siteRule: matchSiteRule(
-            window.location.hostname,
-            this.settings.siteRules,
-          ),
-          targetLang: this.settings.targetLang,
-        });
+        const candidate = findHoverTargetElement(
+          this.lastMouseClient.target,
+          this.getScanOptions(),
+        );
         if (candidate && candidate !== this.lastHoverToggledEl) {
           this.lastHoverToggledEl = candidate;
           this.toggleSingleHostElement(candidate);
@@ -851,14 +1080,10 @@ export class PageTranslationController {
         holdTimer = setTimeout(() => {
           holdTimer = null;
           if ((window.getSelection()?.toString() ?? '').trim().length > 0) return;
-          const candidate = findHoverTargetElement(target, {
-            hostname: window.location.hostname,
-            siteRule: matchSiteRule(
-              window.location.hostname,
-              this.settings.siteRules,
-            ),
-            targetLang: this.settings.targetLang,
-          });
+          const candidate = findHoverTargetElement(
+            target,
+            this.getScanOptions(),
+          );
           if (candidate) {
             if (candidate.closest('a, button')) {
               suppressNextClick = true;

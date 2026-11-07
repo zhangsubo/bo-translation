@@ -52,6 +52,58 @@ export const SiteRulesTab: React.FC<SiteRulesTabProps> = ({
 
   return (
     <div className="flex flex-col gap-6">
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-1 text-base font-semibold">智能外语感知与代码阅读增强</h2>
+        <p className="mb-4 text-xs text-slate-500 dark:text-zinc-400">
+          基于浏览器本地离线语言检测与语法高亮节点识别，零额外网络探测请求。
+        </p>
+
+        <div className="divide-y divide-slate-100 dark:divide-zinc-800">
+          <label className="flex cursor-pointer items-center justify-between gap-4 py-3">
+            <div>
+              <div className="text-xs font-semibold">
+                智能识别外语网页并自动开启双语对照
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-500 dark:text-zinc-400">
+                自动跳过母语页面；后台未激活标签页懒启动（切回前台时再开始翻译）；同一 URL 手动切回「原文」后不再重复打扰。
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.autoTranslateForeignPages}
+              onChange={(e) =>
+                patchSettings({ autoTranslateForeignPages: e.target.checked })
+              }
+              className="h-4 w-4 shrink-0 rounded accent-blue-600"
+            />
+          </label>
+
+          <label className="flex cursor-pointer items-center justify-between gap-4 py-3">
+            <div>
+              <div className="text-xs font-semibold">
+                GitHub 代码阅读视图行内注释翻译
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-500 dark:text-zinc-400">
+                在 <code className="font-mono">github.com</code> /{' '}
+                <code className="font-mono">gist.github.com</code>{' '}
+                查看源码或 Diff 时翻译 <code className="font-mono">.pl-c</code>{' '}
+                自然语言注释，自动过滤被注释掉的代码与 Linter 指令，严格保持左侧行号 1:1 对齐。
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.enableGithubCommentTranslation}
+              onChange={(e) =>
+                patchSettings({
+                  enableGithubCommentTranslation: e.target.checked,
+                })
+              }
+              className="h-4 w-4 shrink-0 rounded accent-blue-600"
+            />
+          </label>
+        </div>
+      </section>
+
       <form
         onSubmit={handleAddRule}
         className="rounded-2xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-zinc-800 dark:bg-zinc-900"

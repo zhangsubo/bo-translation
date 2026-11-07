@@ -1,9 +1,19 @@
+import {
+  getEffectiveBackgroundColor,
+  resolveAdaptiveTranslationColor,
+} from '../../../src/dom-style/adaptive-contrast';
 import type {
   PageViewMode,
+  TranslationColorMode,
   TranslationStylePreset,
 } from '../../../src/types';
-import { BO_TRANS_TAG, BO_UI_HOST_TAG } from './rules';
+import type { CodeCommentMeta } from './github-comments';
+import { BO_SUBTITLE_HOST_TAG, BO_TRANS_TAG, BO_UI_HOST_TAG } from './rules';
 import { restoreRichTranslation, type SerializedNodeGroup } from './serializer';
+import {
+  linkSiblingTypography,
+  shouldMountWrapperAsSibling,
+} from './typography-sync';
 
 const HOST_STYLE_ID = 'bo-trans-host-styles';
 
@@ -24,7 +34,9 @@ export function isIgnoredSelfMutation(record: MutationRecord): boolean {
   if (ignoredMutationTargets.has(record.target)) return true;
   if (
     record.target instanceof Element &&
-    (record.target.closest(BO_TRANS_TAG) || record.target.closest(BO_UI_HOST_TAG))
+    (record.target.closest(BO_TRANS_TAG) ||
+      record.target.closest(BO_UI_HOST_TAG) ||
+      record.target.closest(BO_SUBTITLE_HOST_TAG))
   ) {
     return true;
   }
@@ -39,7 +51,8 @@ export function isIgnoredSelfMutation(record: MutationRecord): boolean {
       (n) =>
         n instanceof Element &&
         (n.tagName === BO_TRANS_TAG.toUpperCase() ||
-          n.tagName === BO_UI_HOST_TAG.toUpperCase()),
+          n.tagName === BO_UI_HOST_TAG.toUpperCase() ||
+          n.tagName === BO_SUBTITLE_HOST_TAG.toUpperCase()),
     )
   ) {
     return true;
@@ -52,10 +65,12 @@ export function ensureHostStyleSheet(
   doc: Document = document,
   stylePreset: TranslationStylePreset = 'blockquote',
   fontScale = 0.96,
+  colorMode: TranslationColorMode = 'adaptive',
 ): void {
   const root = doc.documentElement;
   if (root) {
     root.setAttribute('data-bo-style', stylePreset);
+    root.setAttribute('data-bo-color-mode', colorMode);
     root.style.setProperty('--bo-font-scale', String(fontScale));
   }
 
@@ -64,9 +79,13 @@ export function ensureHostStyleSheet(
   const styleEl = doc.createElement('style');
   styleEl.id = HOST_STYLE_ID;
   styleEl.textContent = `
-[data-bo-host="true"] {
+[data-bo-host="true"]:not([data-bo-sibling-host="true"]) {
   -webkit-line-clamp: unset !important;
   line-clamp: unset !important;
+}
+
+[data-bo-stashed-host="true"] {
+  display: none !important;
 }
 
 bo-trans.bo-trans-wrapper {
@@ -78,13 +97,45 @@ bo-trans.bo-trans-wrapper {
   word-break: break-word;
 }
 
+bo-trans.bo-trans-wrapper[data-bo-sibling="true"] {
+  display: block;
+  margin-top: 0.28em;
+}
+
 bo-trans.bo-trans-wrapper[hidden] {
   display: none !important;
 }
 
 bo-trans .bo-trans-inner {
   font-size: calc(1em * var(--bo-font-scale, 0.96));
-  transition: opacity 0.16s ease, filter 0.18s ease;
+  transition: opacity 0.16s ease, filter 0.18s ease, color 0.16s ease;
+}
+
+:root[data-bo-color-mode="adaptive"][data-bo-view="bilingual"] bo-trans .bo-trans-inner,
+:root[data-bo-color-mode="adaptive"][data-bo-view="original"] bo-trans .bo-trans-inner {
+  color: var(--bo-adaptive-color, inherit);
+}
+
+/* GitHub inline code comment preservation (zero vertical line shift) */
+bo-trans.bo-trans-wrapper[data-code-comment="true"] {
+  display: inline !important;
+  line-height: inherit !important;
+}
+bo-trans.bo-trans-wrapper[data-code-comment="true"] .bo-trans-sep {
+  display: inline !important;
+  opacity: 0.55;
+  font-style: normal;
+}
+bo-trans.bo-trans-wrapper[data-code-comment="true"] .bo-trans-sep[hidden] {
+  display: none !important;
+}
+bo-trans.bo-trans-wrapper[data-code-comment="true"] .bo-trans-inner {
+  display: inline !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  font-size: 0.96em;
 }
 
 /* Style 1: Default Clean */
@@ -195,6 +246,8 @@ export interface RenderedSegmentHandle {
   sourceNodes: ChildNode[];
   serialized: SerializedNodeGroup;
   isShortInline: boolean;
+  mountedAsSibling: boolean;
+  codeCommentMeta?: CodeCommentMeta;
   wrapperEl: HTMLElement;
   sepEl: HTMLElement;
   innerEl: HTMLElement;
@@ -207,6 +260,72 @@ export interface RenderedSegmentHandle {
   manualHoverVisible?: boolean;
 }
 
+function cleanCodeCommentTranslation(
+  raw: string,
+  meta: CodeCommentMeta,
+): string {
+  let clean = raw.trim().replace(/\s*\r?\n\s*/g, ' ');
+  if (meta.prefix && clean.startsWith(meta.prefix)) {
+    clean = clean.slice(meta.prefix.length).trimStart();
+  }
+  const trimmedSuffix = meta.suffix.trim();
+  if (trimmedSuffix && clean.endsWith(trimmedSuffix)) {
+    clean = clean.slice(0, -trimmedSuffix.length).trimEnd();
+  }
+  return clean;
+}
+
+function syncCodeCommentDisplay(
+  handle: RenderedSegmentHandle,
+  pageMode: PageViewMode,
+): void {
+  const meta = handle.codeCommentMeta;
+  if (!meta) return;
+  if (handle.state !== 'done' && handle.state !== 'streaming') return;
+  const clean = cleanCodeCommentTranslation(handle.translatedRaw, meta);
+  if (!clean) return;
+
+  const formatted =
+    pageMode === 'translated-only' && handle.isOriginalStashed
+      ? `${ meta.leadingWs }${ meta.prefix } ${ clean }${ meta.suffix }`
+      : clean;
+
+  if (handle.innerEl.textContent !== formatted) {
+    withIgnoredMutations(handle.hostEl, () => {
+      handle.innerEl.textContent = formatted;
+    });
+  }
+}
+
+export function applySegmentColorMode(
+  handle: RenderedSegmentHandle,
+  colorMode: TranslationColorMode = 'adaptive',
+): void {
+  if (colorMode === 'inherit') {
+    handle.wrapperEl.style.removeProperty('--bo-adaptive-color');
+    return;
+  }
+  if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') {
+    return;
+  }
+  try {
+    const sourceColor = window.getComputedStyle(handle.hostEl).color;
+    const bgColor = getEffectiveBackgroundColor(handle.hostEl);
+    const resolved = resolveAdaptiveTranslationColor(
+      sourceColor,
+      bgColor,
+      colorMode,
+    );
+    if (resolved) {
+      handle.wrapperEl.style.setProperty('--bo-adaptive-color', resolved);
+    } else {
+      handle.wrapperEl.style.removeProperty('--bo-adaptive-color');
+    }
+  } catch {
+    handle.wrapperEl.style.removeProperty('--bo-adaptive-color');
+  }
+}
+
 export function mountSegmentWrapper(params: {
   id: number;
   hostEl: HTMLElement;
@@ -214,27 +333,53 @@ export function mountSegmentWrapper(params: {
   serialized: SerializedNodeGroup;
   isShortInline: boolean;
   targetLang: string;
+  colorMode?: TranslationColorMode;
+  codeCommentMeta?: CodeCommentMeta;
   onRetryClick: (id: number) => void;
 }): RenderedSegmentHandle {
-  const { id, hostEl, sourceNodes, serialized, isShortInline, targetLang, onRetryClick } =
-    params;
+  const {
+    id,
+    hostEl,
+    sourceNodes,
+    serialized,
+    isShortInline,
+    targetLang,
+    colorMode = 'adaptive',
+    codeCommentMeta,
+    onRetryClick,
+  } = params;
   const doc = hostEl.ownerDocument;
+
+  const mountedAsSibling =
+    !codeCommentMeta && shouldMountWrapperAsSibling(hostEl, isShortInline);
 
   const wrapperEl = doc.createElement(BO_TRANS_TAG);
   wrapperEl.className = 'bo-trans-wrapper notranslate';
   wrapperEl.setAttribute('translate', 'no');
   wrapperEl.setAttribute('data-bo-seg-id', String(id));
   wrapperEl.setAttribute('data-state', 'loading');
-  if (isShortInline) {
+  if (isShortInline || codeCommentMeta) {
     wrapperEl.setAttribute('data-short', 'true');
   }
+  if (mountedAsSibling) {
+    wrapperEl.setAttribute('data-bo-sibling', 'true');
+  }
+  if (codeCommentMeta) {
+    wrapperEl.setAttribute('data-code-comment', 'true');
+  }
 
-  const sepEl = isShortInline
-    ? doc.createElement('span')
-    : doc.createElement('br');
+  const sepEl =
+    isShortInline || codeCommentMeta
+      ? doc.createElement('span')
+      : doc.createElement('br');
   sepEl.className = 'bo-trans-sep';
-  if (isShortInline) {
+  if (codeCommentMeta) {
+    sepEl.textContent = '  · ';
+  } else if (isShortInline) {
     sepEl.textContent = ' ';
+  }
+  if (mountedAsSibling) {
+    sepEl.hidden = true;
   }
 
   const innerEl = doc.createElement('font');
@@ -258,21 +403,33 @@ export function mountSegmentWrapper(params: {
   });
 
   const lastNode = sourceNodes[sourceNodes.length - 1];
-  withIgnoredMutations(hostEl, () => {
-    hostEl.setAttribute('data-bo-host', 'true');
-    if (lastNode && lastNode.parentNode === hostEl) {
-      lastNode.after(wrapperEl);
-    } else {
-      hostEl.appendChild(wrapperEl);
-    }
-  });
+  if (mountedAsSibling) {
+    const mutationRoot = hostEl.parentElement ?? hostEl;
+    withIgnoredMutations(mutationRoot, () => {
+      hostEl.setAttribute('data-bo-host', 'true');
+      hostEl.setAttribute('data-bo-sibling-host', 'true');
+      hostEl.after(wrapperEl);
+    });
+    linkSiblingTypography(wrapperEl, hostEl);
+  } else {
+    withIgnoredMutations(hostEl, () => {
+      hostEl.setAttribute('data-bo-host', 'true');
+      if (lastNode && lastNode.parentNode === hostEl) {
+        lastNode.after(wrapperEl);
+      } else {
+        hostEl.appendChild(wrapperEl);
+      }
+    });
+  }
 
-  return {
+  const handle: RenderedSegmentHandle = {
     id,
     hostEl,
     sourceNodes,
     serialized,
-    isShortInline,
+    isShortInline: Boolean(isShortInline || codeCommentMeta),
+    mountedAsSibling,
+    codeCommentMeta,
     wrapperEl,
     sepEl,
     innerEl,
@@ -281,11 +438,23 @@ export function mountSegmentWrapper(params: {
     translatedRaw: '',
     isOriginalStashed: false,
   };
+
+  applySegmentColorMode(handle, colorMode);
+  return handle;
 }
 
 export function stashOriginalNodes(handle: RenderedSegmentHandle): void {
   if (handle.isOriginalStashed) return;
   if (handle.state !== 'done' && !handle.translatedRaw.trim()) return;
+
+  if (handle.mountedAsSibling) {
+    const mutationRoot = handle.hostEl.parentElement ?? handle.hostEl;
+    withIgnoredMutations(mutationRoot, () => {
+      handle.hostEl.setAttribute('data-bo-stashed-host', 'true');
+      handle.isOriginalStashed = true;
+    });
+    return;
+  }
 
   withIgnoredMutations(handle.hostEl, () => {
     for (const node of handle.sourceNodes) {
@@ -293,6 +462,7 @@ export function stashOriginalNodes(handle: RenderedSegmentHandle): void {
         handle.backupTemplate.content.appendChild(node);
       }
     }
+    handle.sepEl.textContent = '';
     handle.sepEl.hidden = true;
     handle.isOriginalStashed = true;
   });
@@ -301,11 +471,25 @@ export function stashOriginalNodes(handle: RenderedSegmentHandle): void {
 export function restoreOriginalNodes(handle: RenderedSegmentHandle): void {
   if (!handle.isOriginalStashed) return;
 
+  if (handle.mountedAsSibling) {
+    const mutationRoot = handle.hostEl.parentElement ?? handle.hostEl;
+    withIgnoredMutations(mutationRoot, () => {
+      handle.hostEl.removeAttribute('data-bo-stashed-host');
+      handle.isOriginalStashed = false;
+    });
+    return;
+  }
+
   withIgnoredMutations(handle.hostEl, () => {
     if (handle.wrapperEl.parentNode === handle.hostEl) {
       handle.wrapperEl.before(handle.backupTemplate.content);
     } else {
       handle.hostEl.prepend(handle.backupTemplate.content);
+    }
+    if (handle.codeCommentMeta) {
+      handle.sepEl.textContent = '  · ';
+    } else if (handle.isShortInline) {
+      handle.sepEl.textContent = ' ';
     }
     handle.sepEl.hidden = false;
     handle.isOriginalStashed = false;
@@ -318,13 +502,20 @@ export function applyViewModeToSegment(
 ): void {
   if (pageMode === 'original') {
     restoreOriginalNodes(handle);
-    withIgnoredMutations(handle.hostEl, () => {
+    syncCodeCommentDisplay(handle, 'original');
+    const mutationRoot = handle.mountedAsSibling
+      ? handle.hostEl.parentElement ?? handle.hostEl
+      : handle.hostEl;
+    withIgnoredMutations(mutationRoot, () => {
       handle.wrapperEl.hidden = !handle.manualHoverVisible;
     });
     return;
   }
 
-  withIgnoredMutations(handle.hostEl, () => {
+  const mutationRoot = handle.mountedAsSibling
+    ? handle.hostEl.parentElement ?? handle.hostEl
+    : handle.hostEl;
+  withIgnoredMutations(mutationRoot, () => {
     handle.wrapperEl.hidden = false;
   });
 
@@ -337,6 +528,8 @@ export function applyViewModeToSegment(
   } else {
     restoreOriginalNodes(handle);
   }
+
+  syncCodeCommentDisplay(handle, pageMode);
 }
 
 export function updateSegmentTranslation(
@@ -353,9 +546,26 @@ export function updateSegmentTranslation(
     handle.serviceName = serviceMeta.serviceName;
   }
 
+  const mutationRoot = handle.mountedAsSibling
+    ? handle.hostEl.parentElement ?? handle.hostEl
+    : handle.hostEl;
+
+  if (handle.codeCommentMeta) {
+    const clean = cleanCodeCommentTranslation(rawTranslated, handle.codeCommentMeta);
+    withIgnoredMutations(mutationRoot, () => {
+      handle.wrapperEl.setAttribute('data-state', status);
+      if (serviceMeta?.serviceName) {
+        handle.wrapperEl.setAttribute('data-bo-service', serviceMeta.serviceName);
+      }
+      handle.innerEl.textContent = clean;
+    });
+    applyViewModeToSegment(handle, pageMode);
+    return;
+  }
+
   const richHtml = restoreRichTranslation(rawTranslated, handle.serialized);
 
-  withIgnoredMutations(handle.hostEl, () => {
+  withIgnoredMutations(mutationRoot, () => {
     handle.wrapperEl.setAttribute('data-state', status);
     if (serviceMeta?.serviceName) {
       handle.wrapperEl.setAttribute('data-bo-service', serviceMeta.serviceName);
@@ -378,7 +588,11 @@ export function markSegmentError(
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-  withIgnoredMutations(handle.hostEl, () => {
+  const mutationRoot = handle.mountedAsSibling
+    ? handle.hostEl.parentElement ?? handle.hostEl
+    : handle.hostEl;
+
+  withIgnoredMutations(mutationRoot, () => {
     handle.wrapperEl.setAttribute('data-state', 'error');
     handle.innerEl.innerHTML = `<span class="bo-trans-retry" title="${ safeMsg }">⚠ 翻译失败 · 点击重试</span>`;
   });

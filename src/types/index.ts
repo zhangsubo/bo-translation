@@ -23,6 +23,7 @@ export type LanguageCode =
 export type TargetLanguageCode = Exclude<LanguageCode, 'auto'>;
 
 export type ServicePresetType =
+  | 'bilibili-index'
   | 'openai'
   | 'minimax'
   | 'xiaomi-mimo'
@@ -94,6 +95,31 @@ export interface SiteRule {
   enabled: boolean;
 }
 
+export type SubtitleDisplayMode =
+  | 'off'
+  | 'bilingual'
+  | 'translated-only'
+  | 'original-only';
+
+export type SubtitleDisplayOrder = 'original-first' | 'translation-first';
+
+export interface VideoSubtitleSettings {
+  enabledByDefault: boolean;
+  subtitleServiceId: string; // 'follow-primary' or ServiceProfile.id
+  displayOrder: SubtitleDisplayOrder;
+  fontScale: number;
+  backgroundOpacity: number;
+  bottomRatio: number;
+  pauseOnHover: boolean;
+  blurTranslation: boolean;
+  preferNativeBilingual: boolean;
+  advancedTimelineUnlocked: boolean;
+  enableActiveTimelineFetch: boolean;
+  pretranslateSeconds: number;
+}
+
+export type TranslationColorMode = 'adaptive' | 'inherit';
+
 export interface ExtensionSettings {
   sourceLang: LanguageCode;
   targetLang: TargetLanguageCode;
@@ -101,14 +127,20 @@ export interface ExtensionSettings {
   selectionServiceId: string; // 'follow-primary' or ServiceProfile.id
   comparisonServiceIds: string[];
   stylePreset: TranslationStylePreset;
+  colorMode: TranslationColorMode;
   fontScale: number;
   showSelectionTriggerIcon: boolean;
+  autoTranslateForeignPages: boolean;
+  enableGithubCommentTranslation: boolean;
   shortcuts: ShortcutConfig;
   floatingTab: FloatingTabConfig;
+  videoSubtitle: VideoSubtitleSettings;
   services: ServiceProfile[];
   glossary: GlossaryEntry[];
   siteRules: SiteRule[];
 }
+
+export const STREAM_PORT_NAME = 'bo-trans-stream';
 
 export interface BatchTranslateItem {
   id: number;
@@ -124,6 +156,8 @@ export type StreamPortClientMessage =
       docTitle?: string;
       sourceLang?: LanguageCode;
       targetLang?: TargetLanguageCode;
+      isSubtitle?: boolean;
+      contextBefore?: string[];
       items: BatchTranslateItem[];
     }
   | {

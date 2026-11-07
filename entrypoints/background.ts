@@ -1,6 +1,6 @@
 import { ConcurrencyLimiter } from '../src/providers/concurrency';
 import {
-  executeBatchTranslation,
+  executeBatchWithThreeStageProtection,
   executeSelectionLookup,
   fetchAvailableModels,
   normalizeOpenAIEndpoints,
@@ -10,17 +10,20 @@ import {
   getSettings,
   resolvePrimaryService,
   resolveSelectionService,
+  resolveSubtitleService,
   subscribeSettings,
 } from '../src/storage';
-import type {
-  ExtensionSettings,
-  RuntimeRequestMessage,
-  ServiceProfile,
-  StreamPortClientMessage,
-  StreamPortServerMessage,
+import {
+  STREAM_PORT_NAME,
+  type ExtensionSettings,
+  type RuntimeRequestMessage,
+  type ServiceProfile,
+  type StreamPortClientMessage,
+  type StreamPortServerMessage,
 } from '../src/types';
+import { consumeRuntimeLastError } from '../src/utils/runtime';
 
-export const STREAM_PORT_NAME = 'bo-trans-stream';
+export { STREAM_PORT_NAME };
 
 const serviceLimiters = new Map<string, ConcurrencyLimiter>();
 
@@ -126,9 +129,49 @@ async function syncLocalOriginDnrRules(
       },
     }));
 
+    // Bilibili Index-Translate public endpoint:
+    // Strip extension Origin/Referer/Cookie to avoid WAF HTTP 412 & protect login cookies,
+    // and attach the official Index-Translate-Client/1.0 User-Agent from call_api.py.
+    const bilibiliIndexRules: chrome.declarativeNetRequest.Rule[] = [
+      {
+        id: 4600,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders' as chrome.declarativeNetRequest.RuleActionType,
+          requestHeaders: [
+            {
+              header: 'Origin',
+              operation: 'remove' as chrome.declarativeNetRequest.HeaderOperation,
+            },
+            {
+              header: 'Referer',
+              operation: 'remove' as chrome.declarativeNetRequest.HeaderOperation,
+            },
+            {
+              header: 'Cookie',
+              operation: 'remove' as chrome.declarativeNetRequest.HeaderOperation,
+            },
+            {
+              header: 'User-Agent',
+              operation: 'set' as chrome.declarativeNetRequest.HeaderOperation,
+              value: 'Index-Translate-Client/1.0',
+            },
+          ],
+        },
+        condition: {
+          urlFilter: 'https://index-translate.bilibili.com/*',
+          initiatorDomains: [chrome.runtime.id],
+          resourceTypes: [
+            'xmlhttprequest' as chrome.declarativeNetRequest.ResourceType,
+            'other' as chrome.declarativeNetRequest.ResourceType,
+          ],
+        },
+      },
+    ];
+
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds,
-      addRules: [...localOriginRules, ...kimiCodeRules],
+      addRules: [...localOriginRules, ...kimiCodeRules, ...bilibiliIndexRules],
     });
   } catch (err) {
     console.warn('[Bo Translation] DNR rule sync warning:', err);
@@ -138,15 +181,15 @@ async function syncLocalOriginDnrRules(
 function resolveServiceById(
   settings: ExtensionSettings,
   serviceId: string | undefined,
-  mode: 'batch' | 'lookup',
+  mode: 'batch' | 'lookup' | 'subtitle',
 ): ServiceProfile {
-  if (serviceId) {
-    const found = settings.services.find((s) => s.id === serviceId);
+  if (serviceId && serviceId !== 'follow-primary') {
+    const found = settings.services.find((s) => s.id === serviceId && s.enabled);
     if (found) return found;
   }
-  return mode === 'lookup'
-    ? resolveSelectionService(settings)
-    : resolvePrimaryService(settings);
+  if (mode === 'lookup') return resolveSelectionService(settings);
+  if (mode === 'subtitle') return resolveSubtitleService(settings);
+  return resolvePrimaryService(settings);
 }
 
 export default defineBackground(() => {
@@ -159,11 +202,17 @@ export default defineBackground(() => {
   if (chrome.contextMenus) {
     chrome.runtime.onInstalled.addListener(() => {
       chrome.contextMenus.removeAll(() => {
-        chrome.contextMenus.create({
-          id: 'bo-toggle-bilingual',
-          title: '切换双语对照翻译 (Bo Translation)',
-          contexts: ['page', 'selection'],
-        });
+        consumeRuntimeLastError();
+        chrome.contextMenus.create(
+          {
+            id: 'bo-toggle-bilingual',
+            title: '切换双语对照翻译 (Bo Translation)',
+            contexts: ['page', 'selection'],
+          },
+          () => {
+            consumeRuntimeLastError();
+          },
+        );
       });
     });
 
@@ -192,6 +241,7 @@ export default defineBackground(() => {
     };
 
     port.onDisconnect.addListener(() => {
+      consumeRuntimeLastError();
       portClosed = true;
       for (const ctrl of inFlightControllers.values()) {
         ctrl.abort();
@@ -217,120 +267,55 @@ export default defineBackground(() => {
 
         try {
           const settings = await getSettings();
-          const service = resolveServiceById(settings, rawMsg.serviceId, 'batch');
+          const service = resolveServiceById(
+            settings,
+            rawMsg.serviceId,
+            rawMsg.isSubtitle ? 'subtitle' : 'batch',
+          );
           const limiter = getServiceLimiter(service);
           const sourceLang = rawMsg.sourceLang ?? settings.sourceLang;
           const targetLang = rawMsg.targetLang ?? settings.targetLang;
 
-          const { completedIds } = await limiter.run(
-            () =>
-              executeBatchTranslation({
-                service,
-                items: rawMsg.items,
-                glossary: settings.glossary,
-                sourceLang,
-                targetLang,
-                docTitle: rawMsg.docTitle,
-                signal: controller.signal,
-                onItemDelta: (id, fullText) => {
-                  safePost({
-                    type: 'ITEM_DELTA',
-                    requestId: rawMsg.requestId,
-                    id,
-                    fullText,
-                    serviceId: service.id,
-                    serviceName: service.name,
-                  });
-                },
-                onItemDone: (id, fullText) => {
-                  safePost({
-                    type: 'ITEM_DONE',
-                    requestId: rawMsg.requestId,
-                    id,
-                    fullText,
-                    serviceId: service.id,
-                    serviceName: service.name,
-                  });
-                },
-              }),
-            controller.signal,
-          );
-
-          // Budgeted fallback recovery if the model dropped 1-2 IDs in a multi-item batch
-          const missingItems = rawMsg.items.filter(
-            (item) => !completedIds.has(item.id),
-          );
-
-          if (missingItems.length > 0 && !controller.signal.aborted) {
-            const retrySlice = missingItems.slice(0, 2);
-            const failRest = missingItems.slice(2);
-
-            for (const skipped of failRest) {
+          await executeBatchWithThreeStageProtection({
+            service,
+            items: rawMsg.items,
+            glossary: settings.glossary,
+            sourceLang,
+            targetLang,
+            docTitle: rawMsg.docTitle,
+            isSubtitle: rawMsg.isSubtitle,
+            contextBefore: rawMsg.contextBefore,
+            signal: controller.signal,
+            runLimited: (fn) => limiter.run(fn, controller.signal),
+            onItemDelta: (id, fullText) => {
+              safePost({
+                type: 'ITEM_DELTA',
+                requestId: rawMsg.requestId,
+                id,
+                fullText,
+                serviceId: service.id,
+                serviceName: service.name,
+              });
+            },
+            onItemDone: (id, fullText) => {
+              safePost({
+                type: 'ITEM_DONE',
+                requestId: rawMsg.requestId,
+                id,
+                fullText,
+                serviceId: service.id,
+                serviceName: service.name,
+              });
+            },
+            onItemError: (id, error) => {
               safePost({
                 type: 'ITEM_ERROR',
                 requestId: rawMsg.requestId,
-                id: skipped.id,
-                error: '模型未返回该段译文，点击可单独重试',
+                id,
+                error,
               });
-            }
-
-            for (const singleItem of retrySlice) {
-              if (controller.signal.aborted) break;
-              try {
-                const retryRes = await limiter.run(
-                  () =>
-                    executeBatchTranslation({
-                      service,
-                      items: [singleItem],
-                      glossary: settings.glossary,
-                      sourceLang,
-                      targetLang,
-                      docTitle: rawMsg.docTitle,
-                      signal: controller.signal,
-                      onItemDelta: (id, fullText) => {
-                        safePost({
-                          type: 'ITEM_DELTA',
-                          requestId: rawMsg.requestId,
-                          id,
-                          fullText,
-                          serviceId: service.id,
-                          serviceName: service.name,
-                        });
-                      },
-                      onItemDone: (id, fullText) => {
-                        safePost({
-                          type: 'ITEM_DONE',
-                          requestId: rawMsg.requestId,
-                          id,
-                          fullText,
-                          serviceId: service.id,
-                          serviceName: service.name,
-                        });
-                      },
-                    }),
-                  controller.signal,
-                );
-                if (!retryRes.completedIds.has(singleItem.id)) {
-                  safePost({
-                    type: 'ITEM_ERROR',
-                    requestId: rawMsg.requestId,
-                    id: singleItem.id,
-                    error: '未获取到有效译文，点击重试',
-                  });
-                }
-              } catch (retryErr) {
-                if (!isAbortError(retryErr)) {
-                  safePost({
-                    type: 'ITEM_ERROR',
-                    requestId: rawMsg.requestId,
-                    id: singleItem.id,
-                    error:
-                      retryErr instanceof Error ? retryErr.message : '翻译请求失败',
-                  });
-                }
-              }
-            }
-          }
+            },
+          });
 
           safePost({ type: 'BATCH_COMPLETE', requestId: rawMsg.requestId });
         } catch (err) {

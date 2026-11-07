@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { BookOpen, Globe, Keyboard, Server } from 'lucide-react';
+import { BookOpen, Globe, Info, Keyboard, Server } from 'lucide-react';
 import { useSettings } from '../../src/storage/useSettings';
+import { AboutTab } from './tabs/AboutTab';
 import { GlossaryTab } from './tabs/GlossaryTab';
 import { ServicesTab } from './tabs/ServicesTab';
 import { ShortcutsAndStyleTab } from './tabs/ShortcutsAndStyleTab';
 import { SiteRulesTab } from './tabs/SiteRulesTab';
 
-type TabKey = 'services' | 'glossary' | 'shortcuts' | 'sites';
+type TabKey = 'services' | 'glossary' | 'shortcuts' | 'sites' | 'about';
 
 const NAV_TABS: Array<{ key: TabKey; label: string; icon: React.ReactNode }> = [
   { key: 'services', label: '模型与服务配置', icon: <Server size={16} /> },
@@ -17,6 +18,7 @@ const NAV_TABS: Array<{ key: TabKey; label: string; icon: React.ReactNode }> = [
     icon: <Keyboard size={16} />,
   },
   { key: 'sites', label: '站点规则', icon: <Globe size={16} /> },
+  { key: 'about', label: '关于', icon: <Info size={16} /> },
 ];
 
 function parseHashTab(): TabKey {
@@ -25,7 +27,8 @@ function parseHashTab(): TabKey {
     raw === 'services' ||
     raw === 'glossary' ||
     raw === 'shortcuts' ||
-    raw === 'sites'
+    raw === 'sites' ||
+    raw === 'about'
   ) {
     return raw;
   }
@@ -60,9 +63,11 @@ export const App: React.FC = () => {
       {/* Sidebar */}
       <aside className="w-full shrink-0 md:w-56">
         <div className="mb-6 flex items-center gap-3 px-2">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-600 text-base font-bold text-white shadow-sm">
-            译
-          </div>
+          <img
+            src="/icon/128.png"
+            alt="Bo Translation"
+            className="h-9 w-9 shrink-0 select-none"
+          />
           <div>
             <div className="text-base font-bold tracking-tight">
               Bo Translation
@@ -111,6 +116,13 @@ export const App: React.FC = () => {
         )}
         {activeTab === 'sites' && (
           <SiteRulesTab settings={settings} patchSettings={patchSettings} />
+        )}
+        {activeTab === 'about' && (
+          <AboutTab
+            settings={settings}
+            patchSettings={patchSettings}
+            onNavigateServices={() => switchTab('services')}
+          />
         )}
       </main>
     </div>

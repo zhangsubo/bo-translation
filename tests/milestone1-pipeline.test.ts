@@ -7,7 +7,11 @@ import {
   parseGlossaryImport,
   unlockKeepGlossaryTerms,
 } from '../src/glossary';
-import { normalizeOpenAIEndpoints } from '../src/providers/openai';
+import {
+  buildProviderExtraParams,
+  isBilibiliIndexService,
+  normalizeOpenAIEndpoints,
+} from '../src/providers/openai';
 import { BatchLineStreamParser } from '../src/providers/stream-parser';
 import { matchSiteRule, normalizeSettings } from '../src/storage';
 import { createServiceFromPreset, SERVICE_PRESETS } from '../src/storage/defaults';
@@ -179,6 +183,7 @@ describe('Milestone 1: Glossary, Stream Parser & Endpoint Normalization', () => 
 
   it('orders built-in presets cleanly and migrates legacy removed presets', () => {
     expect(SERVICE_PRESETS.map((p) => p.preset)).toEqual([
+      'bilibili-index',
       'openai',
       'minimax',
       'xiaomi-mimo',
@@ -207,5 +212,33 @@ describe('Milestone 1: Glossary, Stream Parser & Endpoint Normalization', () => 
     expect(normalized.services.map((s) => s.id)).toEqual(['svc_ollama', 'svc_old_key']);
     expect(normalized.services[1]?.preset).toBe('custom');
     expect(normalized.primaryServiceId).toBe('svc_ollama');
+  });
+
+  it('configures Bilibili Index-Translate preset with call_api.py defaults and enable_thinking toggle', () => {
+    const biliMeta = SERVICE_PRESETS.find((p) => p.preset === 'bilibili-index');
+    expect(biliMeta?.requiresApiKey).toBe(false);
+    expect(biliMeta?.description).toContain('感谢阿B限时免费接口');
+
+    const biliSvc = createServiceFromPreset('bilibili-index');
+    expect(biliSvc.baseUrl).toBe('https://index-translate.bilibili.com/v1');
+    expect(biliSvc.model).toBe('Index-Translate-35B-A3B');
+    expect(biliSvc.temperature).toBe(0);
+    expect(biliSvc.maxConcurrency).toBe(3);
+    expect(isBilibiliIndexService(biliSvc)).toBe(true);
+
+    expect(buildProviderExtraParams(biliSvc)).toEqual({
+      chat_template_kwargs: { enable_thinking: false },
+    });
+    expect(
+      buildProviderExtraParams({ ...biliSvc, suppressThinking: false }),
+    ).toEqual({
+      chat_template_kwargs: { enable_thinking: true },
+    });
+
+    const ep = normalizeOpenAIEndpoints(biliSvc.baseUrl);
+    expect(ep.chatUrl).toBe(
+      'https://index-translate.bilibili.com/v1/chat/completions',
+    );
+    expect(ep.modelsUrl).toBe('https://index-translate.bilibili.com/v1/models');
   });
 });

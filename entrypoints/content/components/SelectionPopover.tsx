@@ -1,18 +1,19 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BookPlus, Check, Copy, RefreshCw, X } from 'lucide-react';
-import { STREAM_PORT_NAME } from '../../background';
 import {
   resolveSelectionService,
   updateSettings,
   upsertGlossaryEntry,
 } from '../../../src/storage';
 import { isEditableTarget } from '../../../src/shortcuts';
-import type {
-  ExtensionSettings,
-  GlossaryStrategy,
-  StreamPortClientMessage,
-  StreamPortServerMessage,
+import {
+  STREAM_PORT_NAME,
+  type ExtensionSettings,
+  type GlossaryStrategy,
+  type StreamPortClientMessage,
+  type StreamPortServerMessage,
 } from '../../../src/types';
+import { consumeRuntimeLastError } from '../../../src/utils/runtime';
 import { BO_TRANS_TAG, BO_UI_HOST_TAG } from '../dom/rules';
 
 interface SelectionPopoverProps {
@@ -33,6 +34,18 @@ function getCleanParagraphContext(range: Range): string {
   if (node.nodeType === Node.TEXT_NODE) {
     node = node.parentElement;
   }
+
+  if (node instanceof Element) {
+    const subCueEl = node.closest('[data-bo-subtitle-cue]');
+    if (subCueEl) {
+      const origLine = subCueEl.querySelector('[data-bo-subtitle-orig]');
+      const subText = (origLine?.textContent ?? subCueEl.textContent ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return subText.slice(0, 720);
+    }
+  }
+
   const el =
     node instanceof Element
       ? node.closest('p, li, td, th, blockquote, dd, dt, h1, h2, h3, h4, h5, h6, article, div')
@@ -180,11 +193,32 @@ export const SelectionPopover: React.FC<SelectionPopoverProps> = ({
     });
 
     port.onDisconnect.addListener(() => {
+      consumeRuntimeLastError();
       portRef.current = null;
       requestMapRef.current.clear();
     });
 
     return port;
+  }, []);
+
+  useEffect(() => {
+    const closePort = () => {
+      if (portRef.current) {
+        const activePort = portRef.current;
+        portRef.current = null;
+        requestMapRef.current.clear();
+        try {
+          activePort.disconnect();
+        } catch {
+          // ignore already closed port
+        }
+      }
+    };
+    window.addEventListener('pagehide', closePort);
+    return () => {
+      window.removeEventListener('pagehide', closePort);
+      closePort();
+    };
   }, []);
 
   const fireLookupForServices = useCallback(

@@ -20,6 +20,7 @@ import type {
   PageViewMode,
   TargetLanguageCode,
 } from '../../src/types';
+import { isGitHubCodeHost } from '../content/dom/github-comments';
 
 export const App: React.FC = () => {
   const { settings, loading, patchSettings } = useSettings();
@@ -96,6 +97,7 @@ export const App: React.FC = () => {
     ? matchSiteRule(hostname, settings.siteRules)
     : undefined;
   const targetLangOptions = LANGUAGE_OPTIONS.filter((l) => l.code !== 'auto');
+  const isGitHub = hostname ? isGitHubCodeHost(hostname) : false;
 
   const toggleDomainAuto = async () => {
     if (!hostname) return;
@@ -126,6 +128,40 @@ export const App: React.FC = () => {
         ],
       };
     });
+  };
+
+  const toggleDomainNever = async () => {
+    if (!hostname) return;
+    const nextAction =
+      currentRule?.action === 'never-translate' ? 'none' : 'never-translate';
+
+    await patchSettings((prev) => {
+      const idx = prev.siteRules.findIndex((r) => r.pattern === hostname);
+      if (idx >= 0) {
+        return {
+          ...prev,
+          siteRules: prev.siteRules.map((r, i) =>
+            i === idx ? { ...r, action: nextAction, enabled: true } : r,
+          ),
+        };
+      }
+      return {
+        ...prev,
+        siteRules: [
+          {
+            id: `rule_${ Date.now() }`,
+            pattern: hostname,
+            action: nextAction,
+            hideFloatingTab: false,
+            enabled: true,
+          },
+          ...prev.siteRules,
+        ],
+      };
+    });
+    if (nextAction === 'never-translate') {
+      setTabState((prev) => ({ ...prev, mode: 'original' }));
+    }
   };
 
   const toggleDomainFloatingTab = async () => {
@@ -163,9 +199,11 @@ export const App: React.FC = () => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-600 text-xs font-bold text-white shadow-sm">
-            译
-          </div>
+          <img
+            src="/icon/128.png"
+            alt="Bo Translation"
+            className="h-7 w-7 shrink-0 select-none"
+          />
           <div>
             <div className="text-sm font-semibold leading-tight">
               Bo Translation
@@ -294,16 +332,44 @@ export const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Domain Rules */}
+      {/* Domain & Smart Auto Rules */}
       {hostname && !restrictedPage && (
         <div className="flex flex-col gap-2 rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="flex items-center gap-1.5 text-[11px] font-medium text-slate-500 dark:text-zinc-400">
-            <Globe size={12} />
-            <span className="truncate">{hostname}</span>
+          <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-slate-500 dark:text-zinc-400">
+            <span className="flex items-center gap-1.5 truncate">
+              <Globe size={12} />
+              <span className="truncate">{hostname}</span>
+            </span>
+            <button
+              type="button"
+              onClick={toggleDomainNever}
+              className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                currentRule?.action === 'never-translate'
+                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-zinc-800 dark:text-zinc-300'
+              }`}
+              title="将当前域名加入免译名单，智能外语自动翻译将跳过此站"
+            >
+              {currentRule?.action === 'never-translate'
+                ? '✓ 此站已免译'
+                : '此站免译'}
+            </button>
           </div>
 
           <label className="flex cursor-pointer items-center justify-between text-xs">
-            <span>总是自动开启双语对照</span>
+            <span>智能识别外语网页自动双语</span>
+            <input
+              type="checkbox"
+              checked={settings.autoTranslateForeignPages}
+              onChange={(e) =>
+                patchSettings({ autoTranslateForeignPages: e.target.checked })
+              }
+              className="h-4 w-4 rounded accent-blue-600"
+            />
+          </label>
+
+          <label className="flex cursor-pointer items-center justify-between text-xs">
+            <span>总是自动翻译此域名</span>
             <input
               type="checkbox"
               checked={currentRule?.action === 'always-bilingual'}
@@ -311,6 +377,22 @@ export const App: React.FC = () => {
               className="h-4 w-4 rounded accent-blue-600"
             />
           </label>
+
+          {isGitHub && (
+            <label className="flex cursor-pointer items-center justify-between text-xs">
+              <span>翻译 GitHub 代码行内注释</span>
+              <input
+                type="checkbox"
+                checked={settings.enableGithubCommentTranslation}
+                onChange={(e) =>
+                  patchSettings({
+                    enableGithubCommentTranslation: e.target.checked,
+                  })
+                }
+                className="h-4 w-4 rounded accent-blue-600"
+              />
+            </label>
+          )}
 
           <label className="flex cursor-pointer items-center justify-between text-xs">
             <span>在此网站显示侧边快捷签</span>

@@ -261,6 +261,43 @@ export const ShortcutsAndStyleTab: React.FC<ShortcutsAndStyleTabProps> = ({
           </div>
         </div>
 
+        {/* Adaptive Contrast Color Mode */}
+        <div className="mb-4 grid gap-3 sm:grid-cols-2">
+          {(
+            [
+              {
+                value: 'adaptive',
+                title: '双色智能提亮 / 压暗（推荐）',
+                desc: '自动采样网页暗色或亮色背景并计算对比度（WCAG ≥ 4.6:1），区分原文与译文层次且不刺眼',
+              },
+              {
+                value: 'inherit',
+                title: '原色对照',
+                desc: '完全继承所在段落的原生文字颜色，适合追求极简同色排版的站点',
+              },
+            ] as const
+          ).map((modeOpt) => {
+            const active = settings.colorMode === modeOpt.value;
+            return (
+              <button
+                key={modeOpt.value}
+                type="button"
+                onClick={() => patchSettings({ colorMode: modeOpt.value })}
+                className={`flex flex-col items-start gap-1 rounded-xl border p-3.5 text-left transition ${
+                  active
+                    ? 'border-blue-600 bg-blue-50/60 ring-1 ring-blue-600/20 dark:bg-blue-950/30'
+                    : 'border-slate-200 hover:bg-slate-50 dark:border-zinc-800 dark:hover:bg-zinc-800/60'
+                }`}
+              >
+                <span className="text-xs font-semibold">{modeOpt.title}</span>
+                <span className="text-[11px] text-slate-500 dark:text-zinc-400">
+                  {modeOpt.desc}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
         <div className="mb-5 grid gap-3 sm:grid-cols-3">
           {STYLE_PRESET_OPTIONS.map((opt) => {
             const active = settings.stylePreset === opt.value;
@@ -300,6 +337,10 @@ export const ShortcutsAndStyleTab: React.FC<ShortcutsAndStyleTabProps> = ({
           <div
             style={{ fontSize: `${ settings.fontScale * 14 }px` }}
             className={`mt-2 leading-relaxed transition ${
+              settings.colorMode === 'adaptive'
+                ? 'text-sky-900 dark:text-sky-300'
+                : 'text-slate-800 dark:text-zinc-200'
+            } ${
               settings.stylePreset === 'blockquote'
                 ? 'rounded-r-md border-l-[3px] border-blue-500 bg-blue-500/[0.06] px-3 py-1.5'
                 : settings.stylePreset === 'muted'

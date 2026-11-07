@@ -1,5 +1,11 @@
 import type { SiteRule, TargetLanguageCode } from '../../../src/types';
 import {
+  type CodeCommentMeta,
+  discoverGitHubCommentElements,
+  isGitHubCodeHost,
+  parseCodeCommentText,
+} from './github-comments';
+import {
   BO_TRANS_TAG,
   BO_UI_HOST_TAG,
   DEFAULT_IGNORE_SELECTOR,
@@ -96,12 +102,14 @@ export interface DiscoveredSegment {
   nodes: ChildNode[];
   serialized: SerializedNodeGroup;
   isShortInline: boolean;
+  codeCommentMeta?: CodeCommentMeta;
 }
 
 export interface ScanOptions {
   hostname: string;
   siteRule?: SiteRule;
   targetLang?: TargetLanguageCode;
+  enableGithubComments?: boolean;
 }
 
 /**
@@ -133,6 +141,18 @@ export function discoverCandidateElements(
     candidates.push(el);
   };
 
+  const appendGitHubCommentsIfEnabled = () => {
+    if (!options.enableGithubComments || !isGitHubCodeHost(options.hostname)) {
+      return;
+    }
+    const commentEls = discoverGitHubCommentElements(root);
+    for (const commentEl of commentEls) {
+      if (seen.has(commentEl)) continue;
+      seen.add(commentEl);
+      candidates.push(commentEl);
+    }
+  };
+
   if (explicitSelectors) {
     try {
       if (root instanceof HTMLElement && root.matches(explicitSelectors)) {
@@ -142,6 +162,7 @@ export function discoverCandidateElements(
       for (const el of Array.from(matched)) {
         pushCandidate(el);
       }
+      appendGitHubCommentsIfEnabled();
       return candidates;
     } catch {
       // Fall through to autoScan if selector is malformed
@@ -212,6 +233,7 @@ export function discoverCandidateElements(
     }
   }
 
+  appendGitHubCommentsIfEnabled();
   return candidates;
 }
 
@@ -223,11 +245,53 @@ export function extractTranslatableSegmentsFromElement(
   hostEl: HTMLElement,
   options: ScanOptions,
 ): DiscoveredSegment[] {
+  const targetLang = options.targetLang ?? 'zh-CN';
+
+  // Special path: GitHub syntax-highlighted code comment span (`.pl-c`)
+  if (
+    options.enableGithubComments &&
+    isGitHubCodeHost(options.hostname) &&
+    hostEl.classList.contains('pl-c') &&
+    !hostEl.parentElement?.closest('.pl-c')
+  ) {
+    if (hostEl.querySelector(BO_TRANS_TAG)) {
+      return [];
+    }
+    const meta = parseCodeCommentText(hostEl.textContent ?? '', targetLang);
+    if (!meta) {
+      return [];
+    }
+    return [
+      {
+        hostEl,
+        nodes: Array.from(hostEl.childNodes),
+        serialized: {
+          serializedText: meta.body,
+          translatablePlainText: meta.body,
+          fullPlainText: meta.body,
+          opaqueMap: new Map(),
+          wrapperMap: new Map(),
+        },
+        isShortInline: true,
+        codeCommentMeta: meta,
+      },
+    ];
+  }
+
+  // Skip if `hostEl` already has an adjacent sibling `<bo-trans data-bo-sibling="true">`
+  const nextEl = hostEl.nextElementSibling;
+  if (
+    nextEl &&
+    nextEl.tagName === BO_TRANS_TAG.toUpperCase() &&
+    nextEl.getAttribute('data-bo-sibling') === 'true'
+  ) {
+    return [];
+  }
+
   const ignoreSelector = buildCombinedIgnoreSelector(
     options.hostname,
     options.siteRule,
   );
-  const targetLang = options.targetLang ?? 'zh-CN';
 
   const groups: ChildNode[][] = [];
   let currentGroup: ChildNode[] = [];
@@ -346,10 +410,35 @@ export function findHoverTargetElement(
     options.siteRule,
   );
 
-  // If hovering inside an existing `<bo-trans>`, return its parent host element!
+  // If hovering inside an existing `<bo-trans>`, return its host element (either sibling or parent)!
   const existingWrapper = el?.closest(BO_TRANS_TAG);
-  if (existingWrapper?.parentElement) {
-    return existingWrapper.parentElement;
+  if (existingWrapper) {
+    if (
+      existingWrapper.getAttribute('data-bo-sibling') === 'true' &&
+      existingWrapper.previousElementSibling instanceof HTMLElement
+    ) {
+      return existingWrapper.previousElementSibling;
+    }
+    if (existingWrapper.parentElement) {
+      return existingWrapper.parentElement;
+    }
+  }
+
+  // Allow hovering over GitHub `.pl-c` comment spans when enabled
+  if (options.enableGithubComments && isGitHubCodeHost(options.hostname)) {
+    const commentSpan = el?.closest('.pl-c');
+    if (
+      commentSpan instanceof HTMLElement &&
+      !commentSpan.parentElement?.closest('.pl-c')
+    ) {
+      const topComment = commentSpan;
+      if (
+        topComment.querySelector(BO_TRANS_TAG) ||
+        extractTranslatableSegmentsFromElement(topComment, options).length > 0
+      ) {
+        return topComment;
+      }
+    }
   }
 
   while (el && el !== document.body && el !== document.documentElement) {
@@ -367,8 +456,12 @@ export function findHoverTargetElement(
       el.tagName === 'TH' ||
       /^H[1-6]$/.test(el.tagName)
     ) {
-      // Check if it already has a `<bo-trans>` child or has translatable segments
-      if (el.querySelector(`:scope > ${ BO_TRANS_TAG }`)) {
+      // Check if it already has a `<bo-trans>` child or adjacent sibling
+      if (
+        el.querySelector(`:scope > ${ BO_TRANS_TAG }`) ||
+        (el.nextElementSibling?.tagName === BO_TRANS_TAG.toUpperCase() &&
+          el.nextElementSibling.getAttribute('data-bo-sibling') === 'true')
+      ) {
         return el;
       }
       const segs = extractTranslatableSegmentsFromElement(el, options);

@@ -2,6 +2,7 @@ import type { TargetLanguageCode } from '../../../src/types';
 
 export const BO_TRANS_TAG = 'bo-trans';
 export const BO_UI_HOST_TAG = 'bo-trans-ui';
+export const BO_SUBTITLE_HOST_TAG = 'bo-subtitle-overlay';
 
 export const HARD_NON_CONTENT_TAGS = new Set([
   'SCRIPT',
@@ -17,6 +18,7 @@ export const HARD_NON_CONTENT_TAGS = new Set([
   'LINK',
   'BO-TRANS',
   'BO-TRANS-UI',
+  'BO-SUBTITLE-OVERLAY',
 ]);
 
 export const KNOWN_BLOCK_TAGS = new Set([
@@ -117,6 +119,10 @@ export const KNOWN_INLINE_TAGS = new Set([
 export const DEFAULT_IGNORE_SELECTOR = [
   BO_TRANS_TAG,
   BO_UI_HOST_TAG,
+  BO_SUBTITLE_HOST_TAG,
+  '.html5-video-player',
+  '.bpx-player-container',
+  '#bilibili-player',
   'pre',
   'button',
   'nav',

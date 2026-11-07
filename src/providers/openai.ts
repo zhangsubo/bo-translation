@@ -12,6 +12,12 @@ import type {
   ServiceProfile,
   TargetLanguageCode,
 } from '../types';
+import {
+  hasProtectedMarkers,
+  reassembleProseFragments,
+  splitIntoProseFragments,
+  validateProtectedTranslation,
+} from './protected-text';
 import { BatchLineStreamParser, stripThinkingBlocks } from './stream-parser';
 
 export interface NormalizedEndpoints {
@@ -72,7 +78,29 @@ function getEnglishLanguageName(code: LanguageCode | TargetLanguageCode): string
   );
 }
 
-function buildProviderExtraParams(service: ServiceProfile): Record<string, unknown> {
+export function isBilibiliIndexService(
+  service: Pick<ServiceProfile, 'preset' | 'baseUrl' | 'model'>,
+): boolean {
+  const host = service.baseUrl.toLowerCase();
+  const model = service.model.toLowerCase();
+  return (
+    service.preset === 'bilibili-index' ||
+    host.includes('index-translate.bilibili.com') ||
+    model.includes('index-translate')
+  );
+}
+
+export function buildProviderExtraParams(
+  service: ServiceProfile,
+): Record<string, unknown> {
+  if (isBilibiliIndexService(service)) {
+    return {
+      chat_template_kwargs: {
+        enable_thinking: !service.suppressThinking,
+      },
+    };
+  }
+
   if (!service.suppressThinking) return {};
 
   const host = service.baseUrl.toLowerCase();
@@ -97,6 +125,8 @@ export function buildBatchTranslationMessages(params: {
   docTitle?: string;
   glossarySection?: string;
   customSystemPrompt?: string;
+  isSubtitle?: boolean;
+  contextBefore?: string[];
 }): Array<{ role: 'system' | 'user'; content: string }> {
   const fromStr =
     params.sourceLang === 'auto'
@@ -104,19 +134,40 @@ export function buildBatchTranslationMessages(params: {
       : getEnglishLanguageName(params.sourceLang);
   const toStr = getEnglishLanguageName(params.targetLang);
 
-  const systemParts = [
-    `You are an expert ${ toStr } translator specializing in technical documentation and articles. Translate from ${ fromStr } into natural, accurate, idiomatic ${ toStr }.`,
-    '',
-    'Strict Formatting Rules:',
-    '1. Each input segment starts with `ID | text`. Output ONLY `ID | translated_text` in the exact same order, one segment per line. Never output markdown code fences or extra commentary.',
-    '2. Preserve opaque tokens such as `{{0}}`, `{{1}}`, `{{K0}}`, and `<br>` EXACTLY as written — never delete, translate, or alter them.',
-    '3. Preserve inline wrapper tags such as `<a0>...</a0>`, `<a1>...</a1>` around the corresponding translated words with valid nesting.',
-    '4. Keep programming identifiers, CLI flags, API paths, and package names intact when appropriate.',
-    '5. Translate short headings, navigation labels, or single phrases directly without asking for more context.',
-  ];
+  const systemParts = params.isSubtitle
+    ? [
+        `You are an expert ${ toStr } video subtitle translator. Translate spoken captions from ${ fromStr } into concise, natural, idiomatic ${ toStr } suitable for on-screen subtitles.`,
+        '',
+        'Strict Formatting Rules:',
+        '1. Each input subtitle line starts with `ID | text`. Output ONLY `ID | translated_text` in the exact same order, one line per ID. Never output markdown code fences or extra commentary.',
+        '2. Preserve opaque tokens such as `{{K0}}` EXACTLY as written.',
+        '3. Keep technical terms, API names, and proper nouns accurate based on the video title and preceding context.',
+        '4. Keep translations natural, spoken, and concise for comfortable video viewing.',
+      ]
+    : [
+        `You are an expert ${ toStr } translator specializing in technical documentation and articles. Translate from ${ fromStr } into natural, accurate, idiomatic ${ toStr }.`,
+        '',
+        'Strict Formatting Rules:',
+        '1. Each input segment starts with `ID | text`. Output ONLY `ID | translated_text` in the exact same order, one segment per line. Never output markdown code fences or extra commentary.',
+        '2. Preserve opaque tokens such as `{{0}}`, `{{1}}`, `{{K0}}`, and `<br>` EXACTLY as written — never delete, translate, or alter them.',
+        '3. Preserve inline wrapper tags such as `<a0>...</a0>`, `<a1>...</a1>` around the corresponding translated words with valid nesting.',
+        '4. Keep programming identifiers, CLI flags, API paths, and package names intact when appropriate.',
+        '5. Translate short headings, navigation labels, or single phrases directly without asking for more context.',
+      ];
 
   if (params.docTitle?.trim()) {
-    systemParts.push('', `Document Context Title: ${ params.docTitle.trim() }`);
+    systemParts.push(
+      '',
+      `${ params.isSubtitle ? 'Video Title' : 'Document Context Title' }: ${ params.docTitle.trim() }`,
+    );
+  }
+
+  if (params.contextBefore && params.contextBefore.length > 0) {
+    systemParts.push(
+      '',
+      'Preceding Spoken Lines (for context reference ONLY — do NOT output or translate these):',
+      ...params.contextBefore.map((line) => `- ${ line }`),
+    );
   }
 
   if (params.glossarySection?.trim()) {
@@ -205,8 +256,16 @@ export async function streamOpenAIChat(params: {
 }): Promise<string> {
   const { service, messages, signal, onChunk } = params;
   const endpoints = normalizeOpenAIEndpoints(service.baseUrl);
+  const chatUrlLower = endpoints.chatUrl.toLowerCase();
+  const isBiliPublicEndpoint = chatUrlLower.includes(
+    'index-translate.bilibili.com',
+  );
+  const isKeylessAllowed =
+    endpoints.isLocal ||
+    service.preset === 'bilibili-index' ||
+    isBiliPublicEndpoint;
 
-  if (!endpoints.isLocal && !service.apiKey.trim()) {
+  if (!isKeylessAllowed && !service.apiKey.trim()) {
     throw new Error(`服务「${ service.name }」尚未填写 API Key`);
   }
 
@@ -218,7 +277,6 @@ export async function streamOpenAIChat(params: {
   }
 
   const modelLower = service.model.toLowerCase();
-  const chatUrlLower = endpoints.chatUrl.toLowerCase();
   const shouldOmitTemperature =
     (chatUrlLower.includes('api.openai.com') &&
       (modelLower.startsWith('o1') ||
@@ -229,7 +287,8 @@ export async function streamOpenAIChat(params: {
     modelLower.startsWith('kimi-k2.5') ||
     modelLower.startsWith('kimi-k3');
 
-  const rawTemp = service.temperature ?? 0.2;
+  const rawTemp =
+    service.temperature ?? (isBilibiliIndexService(service) ? 0 : 0.2);
   const resolvedTemperature = chatUrlLower.includes('minimax')
     ? Math.max(0.1, Math.min(1.0, rawTemp || 0.2))
     : rawTemp;
@@ -247,6 +306,7 @@ export async function streamOpenAIChat(params: {
     headers,
     body: JSON.stringify(bodyPayload),
     signal,
+    ...(isBiliPublicEndpoint ? { credentials: 'omit' as const } : {}),
   });
 
   if (!response.ok) {
@@ -312,6 +372,8 @@ export async function streamOpenAIChat(params: {
   return accumulated;
 }
 
+export type ChatStreamRunner = typeof streamOpenAIChat;
+
 export async function executeBatchTranslation(params: {
   service: ServiceProfile;
   items: BatchTranslateItem[];
@@ -319,10 +381,17 @@ export async function executeBatchTranslation(params: {
   sourceLang: LanguageCode;
   targetLang: TargetLanguageCode;
   docTitle?: string;
+  isSubtitle?: boolean;
+  contextBefore?: string[];
   signal?: AbortSignal;
   onItemDelta: (id: number, text: string) => void;
   onItemDone: (id: number, text: string) => void;
-}): Promise<{ completedIds: Set<number> }> {
+  chatRunner?: ChatStreamRunner;
+}): Promise<{
+  completedIds: Set<number>;
+  damagedIds: Set<number>;
+  fallbackUnlocked: Map<number, string>;
+}> {
   const {
     service,
     items,
@@ -330,9 +399,12 @@ export async function executeBatchTranslation(params: {
     sourceLang,
     targetLang,
     docTitle,
+    isSubtitle,
+    contextBefore,
     signal,
     onItemDelta,
     onItemDone,
+    chatRunner = streamOpenAIChat,
   } = params;
 
   const matchedGlossary = service.enableGlossary
@@ -344,9 +416,11 @@ export async function executeBatchTranslation(params: {
 
   const glossarySection = buildGlossaryPromptSection(matchedGlossary);
   const keepMaps = new Map<number, Map<string, string>>();
+  const lockedSourceMap = new Map<number, string>();
 
   const preparedItems = items.map((item) => {
     if (matchedGlossary.length === 0) {
+      lockedSourceMap.set(item.id, item.text);
       return { id: item.id, text: item.text };
     }
     const { lockedText, keepMap } = lockKeepGlossaryTerms(
@@ -354,8 +428,12 @@ export async function executeBatchTranslation(params: {
       matchedGlossary,
     );
     keepMaps.set(item.id, keepMap);
+    lockedSourceMap.set(item.id, lockedText);
     return { id: item.id, text: lockedText };
   });
+
+  const damagedIds = new Set<number>();
+  const fallbackUnlocked = new Map<number, string>();
 
   const parser = new BatchLineStreamParser(
     items.map((it) => it.id),
@@ -372,7 +450,13 @@ export async function executeBatchTranslation(params: {
         const unlocked = keepMap
           ? unlockKeepGlossaryTerms(rawText, keepMap)
           : rawText;
-        onItemDone(id, unlocked);
+        const lockedSource = lockedSourceMap.get(id) ?? '';
+        if (validateProtectedTranslation(lockedSource, rawText)) {
+          onItemDone(id, unlocked);
+        } else {
+          damagedIds.add(id);
+          fallbackUnlocked.set(id, unlocked);
+        }
       },
     },
   );
@@ -384,9 +468,11 @@ export async function executeBatchTranslation(params: {
     docTitle,
     glossarySection,
     customSystemPrompt: service.customSystemPrompt,
+    isSubtitle,
+    contextBefore,
   });
 
-  await streamOpenAIChat({
+  await chatRunner({
     service,
     messages,
     signal,
@@ -394,7 +480,260 @@ export async function executeBatchTranslation(params: {
   });
 
   const completedIds = parser.finalize();
-  return { completedIds };
+  return { completedIds, damagedIds, fallbackUnlocked };
+}
+
+/**
+ * Stage 3 Fallback (WuPage `translateProseFragments` pattern):
+ * Splits around all protected placeholders (`{{0}}`, `{{K0}}`, `<a0>`, `</a0>`, `<br>`),
+ * sends ONLY pure prose fragments with a redacted context reference, and stitches
+ * original protected markers back locally so zero placeholders can ever be dropped.
+ */
+export async function executeProseFragmentFallback(params: {
+  service: ServiceProfile;
+  item: BatchTranslateItem;
+  glossary: GlossaryEntry[];
+  sourceLang: LanguageCode;
+  targetLang: TargetLanguageCode;
+  docTitle?: string;
+  signal?: AbortSignal;
+  chatRunner?: ChatStreamRunner;
+}): Promise<string | null> {
+  const {
+    service,
+    item,
+    glossary,
+    sourceLang,
+    targetLang,
+    docTitle,
+    signal,
+    chatRunner = streamOpenAIChat,
+  } = params;
+
+  const matchedGlossary = service.enableGlossary
+    ? matchGlossaryEntries([item.plainText || item.text], glossary)
+    : [];
+  const glossarySection = buildGlossaryPromptSection(matchedGlossary);
+  const { lockedText, keepMap } =
+    matchedGlossary.length > 0
+      ? lockKeepGlossaryTerms(item.text, matchedGlossary)
+      : { lockedText: item.text, keepMap: new Map<string, string>() };
+
+  const plan = splitIntoProseFragments(lockedText);
+  if (plan.fragments.length === 0) {
+    return unlockKeepGlossaryTerms(lockedText, keepMap);
+  }
+
+  const fragmentItems = plan.fragments.map((frag, idx) => ({
+    id: idx,
+    text: frag,
+  }));
+
+  const translatedMap = new Map<number, string>();
+  const fragParser = new BatchLineStreamParser(
+    fragmentItems.map((f) => f.id),
+    {
+      onDone: (id, text) => {
+        translatedMap.set(id, text);
+      },
+    },
+  );
+
+  const contextHint = `Full sentence context (protected code/tags replaced by [CODE] for reference ONLY — do NOT output [CODE], translate each numbered prose fragment naturally according to its role in this sentence): "${ plan.redactedContext }"`;
+  const mergedPrompt = [service.customSystemPrompt?.trim(), contextHint]
+    .filter(Boolean)
+    .join('\n');
+
+  const messages = buildBatchTranslationMessages({
+    items: fragmentItems,
+    sourceLang,
+    targetLang,
+    docTitle,
+    glossarySection,
+    customSystemPrompt: mergedPrompt,
+  });
+
+  await chatRunner({
+    service,
+    messages,
+    signal,
+    onChunk: (chunk) => fragParser.push(chunk),
+  });
+  fragParser.finalize();
+
+  if (translatedMap.size === 0) {
+    return null;
+  }
+
+  const reassembled = reassembleProseFragments(plan, translatedMap);
+  if (!validateProtectedTranslation(lockedText, reassembled)) {
+    return null;
+  }
+
+  return unlockKeepGlossaryTerms(reassembled, keepMap);
+}
+
+/**
+ * Full 3-Stage Protected Batch Orchestrator:
+ * Stage 1: Batch translation + placeholder validation
+ * Stage 2: Budgeted single-item retry for missing or placeholder-damaged items
+ * Stage 3: Pure-prose fragment split & local reassembly (`executeProseFragmentFallback`)
+ */
+export async function executeBatchWithThreeStageProtection(params: {
+  service: ServiceProfile;
+  items: BatchTranslateItem[];
+  glossary: GlossaryEntry[];
+  sourceLang: LanguageCode;
+  targetLang: TargetLanguageCode;
+  docTitle?: string;
+  isSubtitle?: boolean;
+  contextBefore?: string[];
+  signal?: AbortSignal;
+  runLimited: <T>(fn: () => Promise<T>) => Promise<T>;
+  onItemDelta: (id: number, text: string) => void;
+  onItemDone: (id: number, text: string) => void;
+  onItemError: (id: number, error: string) => void;
+  chatRunner?: ChatStreamRunner;
+}): Promise<void> {
+  const {
+    service,
+    items,
+    glossary,
+    sourceLang,
+    targetLang,
+    docTitle,
+    isSubtitle,
+    contextBefore,
+    signal,
+    runLimited,
+    onItemDelta,
+    onItemDone,
+    onItemError,
+    chatRunner = streamOpenAIChat,
+  } = params;
+
+  const stage1 = await runLimited(() =>
+    executeBatchTranslation({
+      service,
+      items,
+      glossary,
+      sourceLang,
+      targetLang,
+      docTitle,
+      isSubtitle,
+      contextBefore,
+      signal,
+      onItemDelta,
+      onItemDone,
+      chatRunner,
+    }),
+  );
+
+  const needsRecovery = items.filter(
+    (item) =>
+      !stage1.completedIds.has(item.id) || stage1.damagedIds.has(item.id),
+  );
+
+  if (needsRecovery.length === 0 || signal?.aborted) {
+    return;
+  }
+
+  const retryBudget = 3;
+  const retrySlice = needsRecovery.slice(0, retryBudget);
+  const overflowSlice = needsRecovery.slice(retryBudget);
+
+  for (const skipped of overflowSlice) {
+    const bestEffort = stage1.fallbackUnlocked.get(skipped.id);
+    if (bestEffort?.trim()) {
+      onItemDone(skipped.id, bestEffort);
+    } else {
+      onItemError(skipped.id, '模型未返回该段译文，点击可单独重试');
+    }
+  }
+
+  for (const singleItem of retrySlice) {
+    if (signal?.aborted) break;
+
+    let bestEffort = stage1.fallbackUnlocked.get(singleItem.id);
+    let recovered = false;
+
+    try {
+      // Stage 2: Retry single item individually (skip redundant Stage 2 if batch already had size 1)
+      if (items.length > 1) {
+        const stage2 = await runLimited(() =>
+          executeBatchTranslation({
+            service,
+            items: [singleItem],
+            glossary,
+            sourceLang,
+            targetLang,
+            docTitle,
+            isSubtitle,
+            contextBefore,
+            signal,
+            onItemDelta,
+            onItemDone,
+            chatRunner,
+          }),
+        );
+        if (
+          stage2.completedIds.has(singleItem.id) &&
+          !stage2.damagedIds.has(singleItem.id)
+        ) {
+          recovered = true;
+        } else if (stage2.fallbackUnlocked.has(singleItem.id)) {
+          bestEffort = stage2.fallbackUnlocked.get(singleItem.id);
+        }
+      }
+
+      // Stage 3: Pure-prose fragment split & local reassembly when protected markers were damaged
+      const itemNeedsProtectedRepair =
+        hasProtectedMarkers(singleItem.text) ||
+        (service.enableGlossary && glossary.some((g) => g.enabled && g.strategy === 'keep'));
+
+      if (!recovered && itemNeedsProtectedRepair && !signal?.aborted) {
+        const repaired = await runLimited(() =>
+          executeProseFragmentFallback({
+            service,
+            item: singleItem,
+            glossary,
+            sourceLang,
+            targetLang,
+            docTitle,
+            signal,
+            chatRunner,
+          }),
+        );
+        if (repaired?.trim()) {
+          onItemDelta(singleItem.id, repaired);
+          onItemDone(singleItem.id, repaired);
+          recovered = true;
+        }
+      }
+
+      if (!recovered) {
+        if (bestEffort?.trim()) {
+          onItemDone(singleItem.id, bestEffort);
+        } else {
+          onItemError(singleItem.id, '未获取到有效译文，点击重试');
+        }
+      }
+    } catch (retryErr) {
+      const isAbort =
+        retryErr instanceof Error &&
+        (retryErr.name === 'AbortError' || retryErr.message.includes('Aborted'));
+      if (!isAbort) {
+        if (bestEffort?.trim()) {
+          onItemDone(singleItem.id, bestEffort);
+        } else {
+          onItemError(
+            singleItem.id,
+            retryErr instanceof Error ? retryErr.message : '翻译请求失败',
+          );
+        }
+      }
+    }
+  }
 }
 
 export async function executeSelectionLookup(params: {
@@ -449,13 +788,19 @@ export async function fetchAvailableModels(
   apiKey: string,
 ): Promise<string[]> {
   const endpoints = normalizeOpenAIEndpoints(baseUrl);
+  const isBiliPublic = endpoints.modelsUrl
+    .toLowerCase()
+    .includes('index-translate.bilibili.com');
   const headers: Record<string, string> = {};
   if (apiKey.trim()) {
     headers.Authorization = `Bearer ${ apiKey.trim() }`;
   }
 
   try {
-    const res = await fetch(endpoints.modelsUrl, { headers });
+    const res = await fetch(endpoints.modelsUrl, {
+      headers,
+      ...(isBiliPublic ? { credentials: 'omit' as const } : {}),
+    });
     if (res.ok) {
       const json = await res.json();
       const list = Array.isArray(json?.data)
@@ -463,15 +808,34 @@ export async function fetchAvailableModels(
         : Array.isArray(json?.models)
           ? json.models
           : [];
-      const ids = list
-        .map((m: { id?: string; name?: string }) => m.id || m.name || '')
-        .filter(Boolean);
+      const ids: string[] = Array.from(
+        new Set(
+          list
+            .map((m: { id?: string; name?: string }) => m.id || m.name || '')
+            .filter(Boolean),
+        ),
+      );
       if (ids.length > 0) {
-        return Array.from(new Set(ids));
+        if (isBiliPublic) {
+          ids.sort((a, b) => {
+            if (a === 'Index-Translate-35B-A3B') return -1;
+            if (b === 'Index-Translate-35B-A3B') return 1;
+            return a.localeCompare(b);
+          });
+        }
+        return ids;
       }
     }
   } catch {
-    // Fallback to Ollama native /api/tags if local
+    // Fallback below
+  }
+
+  if (isBiliPublic) {
+    return [
+      'Index-Translate-35B-A3B',
+      'Index-Translate-9B',
+      'Index-Translate-2B',
+    ];
   }
 
   if (endpoints.isLocal) {

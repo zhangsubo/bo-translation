@@ -17,6 +17,15 @@ export interface ServicePresetMeta {
 
 export const SERVICE_PRESETS: ServicePresetMeta[] = [
   {
+    preset: 'bilibili-index',
+    label: 'Bilibili Index-Translate',
+    description:
+      '感谢阿B限时免费接口 · 免 API Key 直连 Index-Translate-35B-A3B 翻译大模型（https://index-translate.bilibili.com/v1）',
+    defaultBaseUrl: 'https://index-translate.bilibili.com/v1',
+    defaultModel: 'Index-Translate-35B-A3B',
+    requiresApiKey: false,
+  },
+  {
     preset: 'openai',
     label: 'OpenAI',
     description: 'OpenAI 官方接口（如 gpt-4o-mini / gpt-4.1-mini）',
@@ -148,9 +157,11 @@ export function createServiceFromPreset(
     model: overrides.model ?? meta.defaultModel,
     enableGlossary: overrides.enableGlossary ?? true,
     suppressThinking: overrides.suppressThinking ?? true,
-    maxConcurrency: overrides.maxConcurrency ?? 4,
+    maxConcurrency:
+      overrides.maxConcurrency ?? (preset === 'bilibili-index' ? 3 : 4),
     batchSize: overrides.batchSize ?? 6,
-    temperature: overrides.temperature ?? 0.2,
+    temperature:
+      overrides.temperature ?? (preset === 'bilibili-index' ? 0 : 0.2),
     customSystemPrompt: overrides.customSystemPrompt ?? '',
     enabled: overrides.enabled ?? true,
   };
@@ -159,12 +170,15 @@ export function createServiceFromPreset(
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   sourceLang: 'auto',
   targetLang: 'zh-CN',
-  primaryServiceId: 'svc_default_ollama',
+  primaryServiceId: 'svc_default_bili_index',
   selectionServiceId: 'follow-primary',
   comparisonServiceIds: [],
   stylePreset: 'blockquote',
+  colorMode: 'adaptive',
   fontScale: 0.96,
   showSelectionTriggerIcon: true,
+  autoTranslateForeignPages: false,
+  enableGithubCommentTranslation: true,
   shortcuts: {
     toggleBilingual: 'Alt+KeyA',
     toggleTranslatedOnly: 'Alt+KeyS',
@@ -178,7 +192,25 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
     side: 'right',
     topRatio: 0.62,
   },
+  videoSubtitle: {
+    enabledByDefault: false,
+    subtitleServiceId: 'follow-primary',
+    displayOrder: 'original-first',
+    fontScale: 1.0,
+    backgroundOpacity: 0.68,
+    bottomRatio: 0.08,
+    pauseOnHover: true,
+    blurTranslation: false,
+    preferNativeBilingual: true,
+    advancedTimelineUnlocked: false,
+    enableActiveTimelineFetch: false,
+    pretranslateSeconds: 60,
+  },
   services: [
+    createServiceFromPreset('bilibili-index', {
+      id: 'svc_default_bili_index',
+      name: 'Bilibili Index-Translate',
+    }),
     createServiceFromPreset('ollama', {
       id: 'svc_default_ollama',
       name: 'Ollama 本地模型',

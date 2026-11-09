@@ -230,11 +230,13 @@ export type RuntimeRequestMessage =
   | { type: 'FETCH_MODELS'; baseUrl: string; apiKey: string }
   | { type: 'GET_TAB_STATE' }
   | { type: 'SET_TAB_VIEW_MODE'; mode: PageViewMode }
-  | { type: 'OPEN_OPTIONS_PAGE'; tab?: string };
+  | { type: 'OPEN_OPTIONS_PAGE'; tab?: string }
+  | { type: 'OPEN_PDF_READER'; url?: string };
 
 export interface PageTabState {
   mode: PageViewMode;
   hostname: string;
   translatedCount: number;
   inFlightCount: number;
+  isPdf?: boolean;
 }

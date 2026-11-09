@@ -38,9 +38,9 @@ export const AboutTab: React.FC<AboutTabProps> = ({
 
   const version = useMemo(() => {
     try {
-      return chrome?.runtime?.getManifest?.()?.version || '0.1.0';
+      return chrome?.runtime?.getManifest?.()?.version || '0.2.0';
     } catch {
-      return '0.1.0';
+      return '0.2.0';
     }
   }, []);
 

@@ -1,12 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import {
   BookOpen,
+  Columns2,
   ExternalLink,
+  FileText,
   Globe,
   Languages,
   Settings,
   Sparkles,
 } from 'lucide-react';
+import { isPdfUrl } from '../../src/pdf/layout';
 import {
   LANGUAGE_OPTIONS,
   matchSiteRule,
@@ -25,6 +28,8 @@ import { isGitHubCodeHost } from '../content/dom/github-comments';
 export const App: React.FC = () => {
   const { settings, loading, patchSettings } = useSettings();
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
+  const [activeTabUrl, setActiveTabUrl] = useState<string>('');
+  const [alreadyInPdfReader, setAlreadyInPdfReader] = useState(false);
   const [hostname, setHostname] = useState<string>('');
   const [restrictedPage, setRestrictedPage] = useState(false);
   const [tabState, setTabState] = useState<PageTabState>({
@@ -41,8 +46,16 @@ export const App: React.FC = () => {
         setRestrictedPage(true);
         return;
       }
+      setActiveTabUrl(tab.url);
       try {
         const u = new URL(tab.url);
+        if (
+          u.protocol === 'chrome-extension:' &&
+          u.pathname.endsWith('/pdf.html')
+        ) {
+          setAlreadyInPdfReader(true);
+          return;
+        }
         if (u.protocol !== 'http:' && u.protocol !== 'https:' && u.protocol !== 'file:') {
           setRestrictedPage(true);
           return;
@@ -82,6 +95,14 @@ export const App: React.FC = () => {
   const openOptions = (section?: string) => {
     const url = chrome.runtime.getURL(
       section ? `/options.html#${ section }` : '/options.html',
+    );
+    chrome.tabs.create({ url });
+    window.close();
+  };
+
+  const openPdfReader = (pdfUrl?: string) => {
+    const url = chrome.runtime.getURL(
+      pdfUrl ? `/pdf.html?url=${ encodeURIComponent(pdfUrl) }` : '/pdf.html',
     );
     chrome.tabs.create({ url });
     window.close();
@@ -224,10 +245,37 @@ export const App: React.FC = () => {
         </button>
       </div>
 
-      {/* Three-State View Switcher */}
-      {restrictedPage ? (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
-          当前标签页为浏览器受限页面，请打开普通外语文章或技术文档体验双语对照。
+      {/* Three-State View Switcher / PDF Entry */}
+      {alreadyInPdfReader ? (
+        <div className="flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-200">
+          <Columns2 size={14} className="shrink-0" />
+          <span>当前正在使用 PDF 左右双语对照阅读器。</span>
+        </div>
+      ) : tabState.isPdf || isPdfUrl(activeTabUrl) ? (
+        <button
+          type="button"
+          onClick={() => openPdfReader(activeTabUrl)}
+          className="flex items-center justify-between gap-2 rounded-xl bg-blue-600 px-3.5 py-2.5 text-left text-xs font-medium text-white shadow-xs transition hover:bg-blue-700"
+        >
+          <span className="flex items-center gap-2">
+            <Columns2 size={15} className="shrink-0" />
+            <span>打开此 PDF 左右双语对照翻译</span>
+          </span>
+          <ExternalLink size={13} className="shrink-0 opacity-85" />
+        </button>
+      ) : restrictedPage ? (
+        <div className="flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+          <span>
+            当前标签页为浏览器受限页面，请打开普通外语网页，或直接打开本地 PDF 进行对照翻译。
+          </span>
+          <button
+            type="button"
+            onClick={() => openPdfReader()}
+            className="inline-flex w-fit items-center gap-1.5 rounded-lg bg-amber-900/10 px-2.5 py-1 font-medium text-amber-950 hover:bg-amber-900/15 dark:bg-amber-200/15 dark:text-amber-100"
+          >
+            <FileText size={12} />
+            <span>打开 PDF 双语翻译 →</span>
+          </button>
         </div>
       ) : (
         <div className="rounded-xl border border-slate-200/80 bg-white p-1.5 shadow-2xs dark:border-zinc-800 dark:bg-zinc-900">
@@ -408,22 +456,32 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Footer Quick Link to Glossary */}
+      {/* Footer Quick Links */}
       <div className="flex items-center justify-between px-0.5 text-[11px] text-slate-500 dark:text-zinc-400">
-        <button
-          type="button"
-          onClick={() => openOptions('glossary')}
-          className="inline-flex items-center gap-1 hover:text-blue-600 dark:hover:text-blue-400"
-        >
-          <BookOpen size={12} />
-          术语库（已配 {settings.glossary.filter((g) => g.enabled).length} 条）
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => openPdfReader()}
+            className="inline-flex items-center gap-1 font-medium text-slate-700 hover:text-blue-600 dark:text-zinc-200 dark:hover:text-blue-400"
+          >
+            <FileText size={12} />
+            <span>PDF 翻译</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => openOptions('glossary')}
+            className="inline-flex items-center gap-1 hover:text-blue-600 dark:hover:text-blue-400"
+          >
+            <BookOpen size={12} />
+            <span>术语库 ({settings.glossary.filter((g) => g.enabled).length})</span>
+          </button>
+        </div>
         <button
           type="button"
           onClick={() => openOptions('shortcuts')}
           className="hover:text-blue-600 dark:hover:text-blue-400"
         >
-          自定义快捷键 →
+          快捷键 →
         </button>
       </div>
     </div>

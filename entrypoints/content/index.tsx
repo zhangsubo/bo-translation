@@ -1,6 +1,7 @@
 import contentUiCss from './style.css?inline';
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
+import { isBrowserPdfDocument } from '../../src/pdf/layout';
 import { getSettings, subscribeSettings } from '../../src/storage';
 import { isEditableTarget, matchesShortcut } from '../../src/shortcuts';
 import type {
@@ -121,6 +122,149 @@ export default defineContentScript({
     }
 
     const initialSettings = await getSettings();
+
+    if (isBrowserPdfDocument(document, window.location.href)) {
+      const pdfTabState: PageTabState = {
+        mode: 'original',
+        hostname: window.location.hostname,
+        translatedCount: 0,
+        inFlightCount: 0,
+        isPdf: true,
+      };
+      const openReader = () => {
+        chrome.runtime
+          .sendMessage({
+            type: 'OPEN_PDF_READER',
+            url: window.location.href,
+          })
+          .catch(() => {});
+      };
+
+      chrome.runtime.onMessage.addListener(
+        (
+          msg: RuntimeRequestMessage | { type: 'TOGGLE_PAGE_BILINGUAL' },
+          _sender,
+          sendResponse,
+        ) => {
+          if (!msg || typeof msg !== 'object') return false;
+          if (msg.type === 'GET_TAB_STATE') {
+            sendResponse(pdfTabState);
+            return false;
+          }
+          if (
+            msg.type === 'TOGGLE_PAGE_BILINGUAL' ||
+            (msg.type === 'SET_TAB_VIEW_MODE' && msg.mode !== 'original')
+          ) {
+            openReader();
+            sendResponse(pdfTabState);
+            return false;
+          }
+          return false;
+        },
+      );
+
+      window.addEventListener(
+        'keydown',
+        (e) => {
+          if (
+            !e.repeat &&
+            matchesShortcut(e, initialSettings.shortcuts.toggleBilingual)
+          ) {
+            e.preventDefault();
+            openReader();
+          }
+        },
+        true,
+      );
+
+      const pdfUi = await createShadowRootUi(ctx, {
+        name: BO_UI_HOST_TAG,
+        css: contentUiCss.replaceAll(':root', ':host'),
+        position: 'inline',
+        anchor: 'body',
+        append: 'last',
+        onMount: (container, _shadow, shadowHost) => {
+          shadowHost.classList.add('notranslate');
+          shadowHost.setAttribute('translate', 'no');
+          const root = ReactDOM.createRoot(container);
+          const PdfEntryPill: React.FC = () => {
+            const [dismissed, setDismissed] = useState(false);
+            if (dismissed) return null;
+            return (
+              <div
+                style={{
+                  position: 'fixed',
+                  top: '68px',
+                  right: '22px',
+                  zIndex: 2147483645,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '2px',
+                  background: 'rgba(15, 23, 42, 0.92)',
+                  color: '#fff',
+                  borderRadius: '999px',
+                  padding: '5px 6px 5px 12px',
+                  boxShadow: '0 8px 24px -4px rgba(15, 23, 42, 0.35)',
+                  border: '1px solid rgba(255, 255, 255, 0.14)',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={openReader}
+                  style={{
+                    all: 'unset',
+                    cursor: 'pointer',
+                    color: '#fff',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}
+                >
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: '6px',
+                      height: '6px',
+                      borderRadius: '999px',
+                      background: '#3b82f6',
+                    }}
+                  />
+                  <span>双语对照阅读 PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDismissed(true)}
+                  aria-label="关闭提示"
+                  style={{
+                    all: 'unset',
+                    cursor: 'pointer',
+                    marginLeft: '4px',
+                    padding: '2px 6px',
+                    borderRadius: '999px',
+                    color: 'rgba(255,255,255,0.65)',
+                    fontSize: '13px',
+                    lineHeight: 1,
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            );
+          };
+          root.render(<PdfEntryPill />);
+          return root;
+        },
+        onRemove: (root) => {
+          root?.unmount();
+        },
+      });
+
+      pdfUi.mount();
+      return;
+    }
+
     const controller = new PageTranslationController(initialSettings);
     controller.init();
 

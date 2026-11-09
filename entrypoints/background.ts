@@ -1,4 +1,5 @@
 import { ConcurrencyLimiter } from '../src/providers/concurrency';
+import { isPdfUrl } from '../src/pdf/layout';
 import {
   executeBatchWithThreeStageProtection,
   executeSelectionLookup,
@@ -218,6 +219,13 @@ export default defineBackground(() => {
 
     chrome.contextMenus.onClicked.addListener((info, tab) => {
       if (info.menuItemId === 'bo-toggle-bilingual' && tab?.id) {
+        if (tab.url && isPdfUrl(tab.url)) {
+          const pdfReaderUrl = chrome.runtime.getURL(
+            `/pdf.html?url=${ encodeURIComponent(tab.url) }`,
+          );
+          chrome.tabs.create({ url: pdfReaderUrl });
+          return;
+        }
         chrome.tabs
           .sendMessage(tab.id, { type: 'TOGGLE_PAGE_BILINGUAL' })
           .catch(() => {});
@@ -401,6 +409,17 @@ export default defineBackground(() => {
       if (msg.type === 'OPEN_OPTIONS_PAGE') {
         const url = chrome.runtime.getURL(
           msg.tab ? `/options.html#${ msg.tab }` : '/options.html',
+        );
+        chrome.tabs.create({ url });
+        sendResponse({ ok: true });
+        return false;
+      }
+
+      if (msg.type === 'OPEN_PDF_READER') {
+        const url = chrome.runtime.getURL(
+          msg.url
+            ? `/pdf.html?url=${ encodeURIComponent(msg.url) }`
+            : '/pdf.html',
         );
         chrome.tabs.create({ url });
         sendResponse({ ok: true });

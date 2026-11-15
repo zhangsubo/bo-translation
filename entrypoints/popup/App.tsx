@@ -23,7 +23,6 @@ import type {
   PageViewMode,
   TargetLanguageCode,
 } from '../../src/types';
-import { isGitHubCodeHost } from '../content/dom/github-comments';
 
 export const App: React.FC = () => {
   const { settings, loading, patchSettings } = useSettings();
@@ -118,7 +117,6 @@ export const App: React.FC = () => {
     ? matchSiteRule(hostname, settings.siteRules)
     : undefined;
   const targetLangOptions = LANGUAGE_OPTIONS.filter((l) => l.code !== 'auto');
-  const isGitHub = hostname ? isGitHubCodeHost(hostname) : false;
 
   const toggleDomainAuto = async () => {
     if (!hostname) return;
@@ -426,21 +424,33 @@ export const App: React.FC = () => {
             />
           </label>
 
-          {isGitHub && (
-            <label className="flex cursor-pointer items-center justify-between text-xs">
-              <span>翻译 GitHub 代码行内注释</span>
-              <input
-                type="checkbox"
-                checked={settings.enableGithubCommentTranslation}
-                onChange={(e) =>
-                  patchSettings({
-                    enableGithubCommentTranslation: e.target.checked,
-                  })
-                }
-                className="h-4 w-4 rounded accent-blue-600"
-              />
-            </label>
-          )}
+          <label className="flex cursor-pointer items-center justify-between text-xs">
+            <span>自动跳过代码块</span>
+            <input
+              type="checkbox"
+              checked={settings.skipCodeBlocks}
+              onChange={(e) =>
+                patchSettings({
+                  skipCodeBlocks: e.target.checked,
+                })
+              }
+              className="h-4 w-4 rounded accent-blue-600"
+            />
+          </label>
+
+          <label className="flex cursor-pointer items-center justify-between text-xs">
+            <span>翻译代码块行内注释</span>
+            <input
+              type="checkbox"
+              checked={settings.enableGithubCommentTranslation}
+              onChange={(e) =>
+                patchSettings({
+                  enableGithubCommentTranslation: e.target.checked,
+                })
+              }
+              className="h-4 w-4 rounded accent-blue-600"
+            />
+          </label>
 
           <label className="flex cursor-pointer items-center justify-between text-xs">
             <span>在此网站显示侧边快捷签</span>

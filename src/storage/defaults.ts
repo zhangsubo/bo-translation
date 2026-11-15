@@ -178,6 +178,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   fontScale: 0.96,
   showSelectionTriggerIcon: true,
   autoTranslateForeignPages: false,
+  skipCodeBlocks: true,
   enableGithubCommentTranslation: true,
   shortcuts: {
     toggleBilingual: 'Alt+KeyA',

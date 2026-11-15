@@ -116,14 +116,13 @@ export const KNOWN_INLINE_TAGS = new Set([
   'WBR',
 ]);
 
-export const DEFAULT_IGNORE_SELECTOR = [
+export const CORE_IGNORE_SELECTOR = [
   BO_TRANS_TAG,
   BO_UI_HOST_TAG,
   BO_SUBTITLE_HOST_TAG,
   '.html5-video-player',
   '.bpx-player-container',
   '#bilibili-player',
-  'pre',
   'button',
   'nav',
   'footer',
@@ -137,14 +136,6 @@ export const DEFAULT_IGNORE_SELECTOR = [
   '.math-block',
   '.MathJax',
   'span.katex-display',
-  '.prism-code',
-  '.enlighter-code',
-  '.rc-CodeBlock',
-  '[role="code"]',
-  'table.highlight',
-  'div[class^="codeBlockContent"]',
-  'div[class^="codeBlockLines"]',
-  'div[class^="token-line"]',
   '.monaco-editor',
   '.cm-editor',
   '.CodeMirror',
@@ -157,6 +148,20 @@ export const DEFAULT_IGNORE_SELECTOR = [
   '[translate="no"]',
   '[contenteditable="true"]',
 ].join(', ');
+
+export const CODE_BLOCK_IGNORE_SELECTOR = [
+  'pre',
+  '.prism-code',
+  '.enlighter-code',
+  '.rc-CodeBlock',
+  '[role="code"]',
+  'table.highlight',
+  'div[class^="codeBlockContent"]',
+  'div[class^="codeBlockLines"]',
+  'div[class^="token-line"]',
+].join(', ');
+
+export const DEFAULT_IGNORE_SELECTOR = `${ CORE_IGNORE_SELECTOR }, ${ CODE_BLOCK_IGNORE_SELECTOR }`;
 
 export const KEEP_INLINE_TAGS = new Set([
   'CODE',

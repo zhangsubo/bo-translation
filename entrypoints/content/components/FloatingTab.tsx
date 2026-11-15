@@ -14,7 +14,6 @@ import type {
   TranslationStylePreset,
 } from '../../../src/types';
 import type { PageTranslationController } from '../dom/controller';
-import { isGitHubCodeHost } from '../dom/github-comments';
 
 interface FloatingTabProps {
   controller: PageTranslationController;
@@ -79,7 +78,6 @@ export const FloatingTab: React.FC<FloatingTabProps> = ({
   const enabledServices = settings.services.filter((s) => s.enabled);
   const activeService = resolvePrimaryService(settings);
   const isActive = tabState.mode !== 'original';
-  const isGitHub = isGitHubCodeHost(hostname);
 
   const handleMouseEnter = () => {
     if (closeTimerRef.current) {
@@ -356,21 +354,42 @@ export const FloatingTab: React.FC<FloatingTabProps> = ({
             </div>
           </div>
 
-          {isGitHub && (
-            <div className="bo-field-row">
+          <div className="bo-field-row">
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '5px',
+              }}
+            >
               <button
                 type="button"
                 className="bo-chip-btn"
                 style={{
-                  width: '100%',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  gap: '5px',
+                  gap: '4px',
                 }}
+                data-active={settings.skipCodeBlocks ? 'true' : 'false'}
+                title="开启时自动跳过代码块与伪代码注释；关闭后放行"
+                onClick={() =>
+                  updateSettings({
+                    skipCodeBlocks: !settings.skipCodeBlocks,
+                  })
+                }
+              >
+                <Code2 size={11} />
+                <span>跳过代码块</span>
+              </button>
+
+              <button
+                type="button"
+                className="bo-chip-btn"
                 data-active={
                   settings.enableGithubCommentTranslation ? 'true' : 'false'
                 }
+                title="翻译 GitHub 与技术文档代码块内的自然语言注释"
                 onClick={() =>
                   updateSettings({
                     enableGithubCommentTranslation:
@@ -378,15 +397,10 @@ export const FloatingTab: React.FC<FloatingTabProps> = ({
                   })
                 }
               >
-                <Code2 size={12} />
-                <span>
-                  {settings.enableGithubCommentTranslation
-                    ? '已开启代码行内注释翻译'
-                    : '开启代码行内注释翻译'}
-                </span>
+                代码内注释
               </button>
             </div>
-          )}
+          </div>
 
           <div className="bo-panel-footer">
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>

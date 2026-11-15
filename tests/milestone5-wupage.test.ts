@@ -7,6 +7,7 @@ import {
   updateSegmentTranslation,
 } from '../entrypoints/content/dom/renderer';
 import { scanTranslatableSegments } from '../entrypoints/content/dom/scanner';
+import { findHoverTargetElement } from '../entrypoints/content/dom/scanner';
 import { serializeNodeGroup } from '../entrypoints/content/dom/serializer';
 import { clearAllSiblingTypography } from '../entrypoints/content/dom/typography-sync';
 import { detectIsForeignPage } from '../src/auto-translate/detector';
@@ -439,5 +440,119 @@ NOTE Intro block
     // Translated-only mode preserves `// ` comment delimiter while hiding English prose
     applyViewModeToSegment(handle, 'translated-only');
     expect(seg.hostEl.textContent).toBe('// 在网络超时时确保幂等重试令牌');
+  });
+
+  it('distinguishes imperative prose comments from code/directives, scans tech-doc code comments, and supports skipCodeBlocks + Alt-hover escape hatch', () => {
+    // Prose starting with `return` / `import` / `export` must NOT be misclassified as commented-out code
+    expect(
+      parseCodeCommentText('// return early if the socket is already closed')?.body,
+    ).toBe('return early if the socket is already closed');
+    expect(
+      parseCodeCommentText('// import metadata from request headers')?.body,
+    ).toBe('import metadata from request headers');
+    expect(
+      parseCodeCommentText('// export metrics every ten seconds')?.body,
+    ).toBe('export metrics every ten seconds');
+
+    // Genuine code-like comments still skipped by default
+    expect(parseCodeCommentText('// return fallbackValue(ctx);')).toBeNull();
+    expect(parseCodeCommentText('// const oldVal = compute(a, b);')).toBeNull();
+    expect(parseCodeCommentText("// import { useState } from 'react'")).toBeNull();
+
+    // P2 compiler/build/editor directives always skipped
+    expect(parseCodeCommentText('//go:build linux && amd64')).toBeNull();
+    expect(parseCodeCommentText('//go:embed assets/*')).toBeNull();
+    expect(parseCodeCommentText('// +build darwin')).toBeNull();
+    expect(parseCodeCommentText('// #pragma once')).toBeNull();
+    expect(parseCodeCommentText('# -*- coding: utf-8 -*-')).toBeNull();
+    expect(parseCodeCommentText('// vim: set ts=2 sw=2:')).toBeNull();
+
+    // Non-GitHub technical documentation code blocks (Prism, Highlight.js, Shiki) + live Monaco editor guard
+    document.body.innerHTML = `
+      <main>
+        <pre><code class="language-py"><span id="prism-c" class="token comment"># Refresh token before expiry</span></code></pre>
+        <pre><code class="language-js"><span id="hljs-c" class="hljs-comment">// Retry request on transient error</span></code></pre>
+        <pre class="shiki"><code><span class="line"><span id="shiki-c">// Keep connection alive across hops</span></span></code></pre>
+        <div class="monaco-editor"><pre><span id="monaco-c" class="token comment">// Editor comment must stay ignored</span></pre></div>
+      </main>
+    `;
+
+    const docCommentSegs = scanTranslatableSegments(document, {
+      hostname: 'docs.example.com',
+      targetLang: 'zh-CN',
+      enableGithubComments: true,
+      skipCodeBlocks: true,
+    });
+    expect(docCommentSegs.map((s) => s.hostEl.id)).toEqual([
+      'prism-c',
+      'hljs-c',
+      'shiki-c',
+    ]);
+
+    // Toggling `skipCodeBlocks: false` unlocks code-like comments & plain `<pre>` blocks (mounted as sibling)
+    document.body.innerHTML = `
+      <main>
+        <pre id="plain-pre">Configuration guide:\nSet timeout before starting worker.</pre>
+        <pre><code class="language-ts"><span id="code-like-c" class="token comment">// return fallbackValue(ctx);</span><span id="go-dir" class="token comment">//go:build linux</span></code></pre>
+      </main>
+    `;
+
+    expect(
+      scanTranslatableSegments(document, {
+        hostname: 'docs.example.com',
+        targetLang: 'zh-CN',
+        enableGithubComments: true,
+        skipCodeBlocks: true,
+      }),
+    ).toEqual([]);
+
+    const unlockedSegs = scanTranslatableSegments(document, {
+      hostname: 'docs.example.com',
+      targetLang: 'zh-CN',
+      enableGithubComments: true,
+      skipCodeBlocks: false,
+    });
+    expect(unlockedSegs.map((s) => s.hostEl.id)).toEqual([
+      'code-like-c',
+      'plain-pre',
+    ]);
+
+    const preSeg = unlockedSegs.find((s) => s.hostEl.id === 'plain-pre')!;
+    expect(preSeg.serialized.serializedText).toBe(
+      'Configuration guide:<br>Set timeout before starting worker.',
+    );
+    const preHandle = mountSegmentWrapper({
+      id: 101,
+      hostEl: preSeg.hostEl,
+      sourceNodes: preSeg.nodes,
+      serialized: preSeg.serialized,
+      isShortInline: preSeg.isShortInline,
+      targetLang: 'zh-CN',
+      onRetryClick: () => {},
+    });
+    expect(preHandle.mountedAsSibling).toBe(true);
+    expect(preHandle.wrapperEl.getAttribute('data-bo-sibling')).toBe('true');
+
+    // Escape hatch: `Alt + Hover` (`forceManualHover: true`) can still target skipped `<pre>` & code-like comments
+    const plainPreEl = document.getElementById('plain-pre')!;
+    const codeLikeEl = document.getElementById('code-like-c')!;
+    expect(
+      findHoverTargetElement(plainPreEl.firstChild, {
+        hostname: 'docs.example.com',
+        targetLang: 'zh-CN',
+        enableGithubComments: true,
+        skipCodeBlocks: true,
+        forceManualHover: true,
+      }),
+    ).toBe(plainPreEl);
+    expect(
+      findHoverTargetElement(codeLikeEl.firstChild, {
+        hostname: 'docs.example.com',
+        targetLang: 'zh-CN',
+        enableGithubComments: true,
+        skipCodeBlocks: true,
+        forceManualHover: true,
+      }),
+    ).toBe(codeLikeEl);
   });
 });

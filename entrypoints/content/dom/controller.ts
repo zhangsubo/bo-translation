@@ -26,7 +26,12 @@ import {
   updateSegmentTranslation,
   withViewportScrollAnchor,
 } from './renderer';
-import { BO_TRANS_TAG, BO_UI_HOST_TAG } from './rules';
+import { isLikelyCommentedOutCode } from './github-comments';
+import {
+  BO_TRANS_TAG,
+  BO_UI_HOST_TAG,
+  CODE_BLOCK_IGNORE_SELECTOR,
+} from './rules';
 import {
   discoverCandidateElements,
   extractTranslatableSegmentsFromElement,
@@ -89,12 +94,14 @@ export class PageTranslationController {
     return `${ window.location.origin }${ window.location.pathname }${ window.location.search }${ window.location.hash }`;
   }
 
-  private getScanOptions(): ScanOptions {
+  private getScanOptions(forceManualHover = false): ScanOptions {
     return {
       hostname: window.location.hostname,
       siteRule: matchSiteRule(window.location.hostname, this.settings.siteRules),
       targetLang: this.settings.targetLang,
       enableGithubComments: this.settings.enableGithubCommentTranslation,
+      skipCodeBlocks: this.settings.skipCodeBlocks,
+      forceManualHover,
     };
   }
 
@@ -122,6 +129,7 @@ export class PageTranslationController {
     const prevScale = this.settings.fontScale;
     const prevColorMode = this.settings.colorMode;
     const prevGithubComments = this.settings.enableGithubCommentTranslation;
+    const prevSkipCodeBlocks = this.settings.skipCodeBlocks;
     const prevAutoTranslate = this.settings.autoTranslateForeignPages;
     const prevSiteRules = this.settings.siteRules;
     this.settings = next;
@@ -153,6 +161,37 @@ export class PageTranslationController {
           }
         }
       } else if (this.mode !== 'original') {
+        for (const handle of this.segments.values()) {
+          if (
+            handle.codeCommentMeta &&
+            !(next.skipCodeBlocks && this.isSkippedCodeBlockHandle(handle))
+          ) {
+            applyViewModeToSegment(handle, this.mode);
+          }
+        }
+        this.scanAndObserveRoot(document);
+      }
+    }
+
+    if (prevSkipCodeBlocks !== next.skipCodeBlocks) {
+      if (next.skipCodeBlocks) {
+        for (const handle of this.segments.values()) {
+          if (this.isSkippedCodeBlockHandle(handle)) {
+            handle.manualHoverVisible = false;
+            applyViewModeToSegment(handle, 'original');
+          }
+        }
+      } else if (this.mode !== 'original') {
+        for (const handle of this.segments.values()) {
+          if (!this.isSkippedCodeBlockHandle(handle)) continue;
+          if (
+            handle.codeCommentMeta &&
+            !next.enableGithubCommentTranslation
+          ) {
+            continue;
+          }
+          applyViewModeToSegment(handle, this.mode);
+        }
         this.scanAndObserveRoot(document);
       }
     }
@@ -433,6 +472,9 @@ export class PageTranslationController {
       ) {
         continue;
       }
+      if (this.settings.skipCodeBlocks && this.isSkippedCodeBlockHandle(handle)) {
+        continue;
+      }
       applyViewModeToSegment(handle, nextMode);
       // Re-enqueue segments that were cancelled while still loading
       if (handle.state === 'loading' && !this.inFlightSegmentIds.has(handle.id)) {
@@ -465,7 +507,7 @@ export class PageTranslationController {
     }
     const targetEl = findHoverTargetElement(
       this.lastMouseClient.target,
-      this.getScanOptions(),
+      this.getScanOptions(true),
     );
     if (!targetEl) return false;
     const ids = this.hostToSegIds.get(targetEl);
@@ -634,7 +676,7 @@ export class PageTranslationController {
   ): RenderedSegmentHandle[] {
     const discovered = extractTranslatableSegmentsFromElement(
       hostEl,
-      this.getScanOptions(),
+      this.getScanOptions(manualHover),
     );
 
     if (discovered.length === 0) return [];
@@ -998,16 +1040,22 @@ export class PageTranslationController {
           }, 260);
         }
 
-        // Modifier + Hover trigger in original mode
-        if (this.mode === 'original' && this.isHoverModifierPressed(e)) {
+        // Modifier + Hover trigger in original mode (or escape hatch for skipped nodes in bilingual mode)
+        if (
+          (this.mode === 'original' || this.mode === 'bilingual') &&
+          this.isHoverModifierPressed(e)
+        ) {
           const candidate = findHoverTargetElement(
             e.target,
-            this.getScanOptions(),
+            this.getScanOptions(true),
           );
-          if (candidate && candidate !== this.lastHoverToggledEl) {
+          const canToggle =
+            candidate &&
+            (this.mode === 'original' || !this.hostToSegIds.has(candidate));
+          if (canToggle && candidate !== this.lastHoverToggledEl) {
             this.lastHoverToggledEl = candidate;
             this.toggleSingleHostElement(candidate);
-          } else if (!candidate) {
+          } else if (!canToggle) {
             this.lastHoverToggledEl = null;
           }
         } else {
@@ -1045,12 +1093,18 @@ export class PageTranslationController {
         return;
       }
 
-      if (this.mode === 'original' && this.lastMouseClient.target) {
+      if (
+        (this.mode === 'original' || this.mode === 'bilingual') &&
+        this.lastMouseClient.target
+      ) {
         const candidate = findHoverTargetElement(
           this.lastMouseClient.target,
-          this.getScanOptions(),
+          this.getScanOptions(true),
         );
-        if (candidate && candidate !== this.lastHoverToggledEl) {
+        const canToggle =
+          candidate &&
+          (this.mode === 'original' || !this.hostToSegIds.has(candidate));
+        if (canToggle && candidate !== this.lastHoverToggledEl) {
           this.lastHoverToggledEl = candidate;
           this.toggleSingleHostElement(candidate);
         }
@@ -1082,7 +1136,7 @@ export class PageTranslationController {
           if ((window.getSelection()?.toString() ?? '').trim().length > 0) return;
           const candidate = findHoverTargetElement(
             target,
-            this.getScanOptions(),
+            this.getScanOptions(true),
           );
           if (candidate) {
             if (candidate.closest('a, button')) {
@@ -1129,6 +1183,16 @@ export class PageTranslationController {
         }
       },
       true,
+    );
+  }
+
+  private isSkippedCodeBlockHandle(handle: RenderedSegmentHandle): boolean {
+    if (handle.codeCommentMeta) {
+      return isLikelyCommentedOutCode(handle.codeCommentMeta.body);
+    }
+    return (
+      handle.hostEl.tagName === 'PRE' ||
+      Boolean(handle.hostEl.closest(CODE_BLOCK_IGNORE_SELECTOR))
     );
   }
 }

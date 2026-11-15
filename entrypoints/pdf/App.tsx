@@ -9,6 +9,7 @@ import React, {
 } from 'react';
 import {
   AlertTriangle,
+  Code2,
   Columns2,
   FileText,
   FileUp,
@@ -31,6 +32,7 @@ import {
 } from '../../src/auto-translate/detector';
 import {
   analyzeRecognizableText,
+  clampBlockBudgetsWithBackgroundObstacles,
   extractPageLayoutBlocks,
   type PdfFontCategory,
   type PdfPageLayout,
@@ -117,7 +119,7 @@ function isPasswordError(err: unknown): boolean {
   );
 }
 
-interface ReplicaBlockOverlayProps {
+export interface ReplicaBlockOverlayProps {
   block: PdfTextBlock;
   pageWidth: number;
   pageHeight: number;
@@ -128,7 +130,7 @@ interface ReplicaBlockOverlayProps {
   onRetranslate: () => void;
 }
 
-const ReplicaBlockOverlay: React.FC<ReplicaBlockOverlayProps> = ({
+export const ReplicaBlockOverlay: React.FC<ReplicaBlockOverlayProps> = ({
   block,
   pageWidth,
   pageHeight,
@@ -148,10 +150,11 @@ const ReplicaBlockOverlay: React.FC<ReplicaBlockOverlayProps> = ({
   );
   const displayText = state?.text || '';
   const status = state?.status ?? 'idle';
+  const hasContent = Boolean(displayText) || status === 'error';
 
   useLayoutEffect(() => {
     const el = boxRef.current;
-    if (!el || !displayText) {
+    if (!el || !hasContent) {
       setCompressed(false);
       return;
     }
@@ -193,6 +196,8 @@ const ReplicaBlockOverlay: React.FC<ReplicaBlockOverlayProps> = ({
     }
   }, [
     displayText,
+    status,
+    hasContent,
     baseFontPx,
     maxBudgetPx,
     block.lineHeightRatio,
@@ -210,6 +215,19 @@ const ReplicaBlockOverlay: React.FC<ReplicaBlockOverlayProps> = ({
     block.firstLineIndent > 0
       ? `${ (block.firstLineIndent / Math.max(1, block.fontSize)).toFixed(2) }em`
       : undefined;
+
+  const retryButton = (
+    <button
+      type="button"
+      onClick={onRetranslate}
+      title={state?.error || '点击重新翻译此段'}
+      style={{ textIndent: 0 }}
+      className="inline-flex items-center gap-1 rounded bg-red-50/95 px-1.5 py-0.5 font-sans text-[10px] font-normal text-red-700 ring-1 ring-red-200 hover:bg-red-100"
+    >
+      <RotateCcw size={9} />
+      <span>⚠ 译文获取失败（已保留原文）· 点击重试</span>
+    </button>
+  );
 
   return (
     <div
@@ -249,15 +267,16 @@ const ReplicaBlockOverlay: React.FC<ReplicaBlockOverlayProps> = ({
       }}
     >
       {status === 'error' ? (
-        <button
-          type="button"
-          onClick={onRetranslate}
-          className="inline-flex items-center gap-1 rounded bg-red-50/95 px-1.5 py-0.5 text-[11px] font-normal text-red-700 ring-1 ring-red-200 hover:bg-red-100"
-          style={{ textIndent: 0 }}
-        >
-          <RotateCcw size={10} />
-          <span>翻译失败 · 点击重试</span>
-        </button>
+        <>
+          <span className="opacity-85">{block.text}</span>
+          {block.lineRects.length > 1 ? (
+            <div style={{ textIndent: 0 }} className="mt-0.5">
+              {retryButton}
+            </div>
+          ) : (
+            <> {retryButton}</>
+          )}
+        </>
       ) : displayText ? (
         <>
           <span>{displayText}</span>
@@ -299,10 +318,15 @@ interface PdfPageRowProps {
   targetPaneWidth: number;
   layoutMode: PdfLayoutMode;
   canTranslate: boolean;
+  skipCodeBlocks: boolean;
   forceActivate: boolean;
   pageTranslations: Record<number, BlockTranslationState>;
   cachedLayout: PdfPageLayout | undefined;
-  onLayoutReady: (pageNumber: number, layout: PdfPageLayout) => void;
+  onLayoutReady: (
+    pageNumber: number,
+    layout: PdfPageLayout,
+    skipCodeBlocks: boolean,
+  ) => void;
   onRequestPageTranslate: (pageNumber: number, blocks: PdfTextBlock[]) => void;
   onRetranslateBlock: (pageNumber: number, block: PdfTextBlock) => void;
   onPageVisible: (pageNumber: number) => void;
@@ -315,6 +339,7 @@ const PdfPageRow: React.FC<PdfPageRowProps> = ({
   targetPaneWidth,
   layoutMode,
   canTranslate,
+  skipCodeBlocks,
   forceActivate,
   pageTranslations,
   cachedLayout,
@@ -421,6 +446,7 @@ const PdfPageRow: React.FC<PdfPageRowProps> = ({
             viewportScale: normViewport.scale,
             pageWidth: normViewport.width,
             pageHeight: normViewport.height,
+            skipCodeBlocks,
             resolveFontMeta: (fontName: string): RawPdfFontMeta | undefined => {
               try {
                 if (page.commonObjs.has(fontName)) {
@@ -526,6 +552,16 @@ const PdfPageRow: React.FC<PdfPageRowProps> = ({
                   }
                 }
 
+                if (
+                  clampBlockBudgetsWithBackgroundObstacles(
+                    translatableBlocks,
+                    bgImg,
+                    rasterBucket,
+                  )
+                ) {
+                  colorsUpdated = true;
+                }
+
                 if (colorsUpdated) {
                   resolvedLayout = {
                     ...resolvedLayout,
@@ -538,7 +574,7 @@ const PdfPageRow: React.FC<PdfPageRowProps> = ({
         }
 
         setLayout(resolvedLayout);
-        onLayoutReady(pageNumber, resolvedLayout);
+        onLayoutReady(pageNumber, resolvedLayout, skipCodeBlocks);
         setRenderedOk(true);
 
         if (canTranslate && translatableBlocks.length > 0) {
@@ -562,6 +598,7 @@ const PdfPageRow: React.FC<PdfPageRowProps> = ({
     pageNumber,
     rasterBucket,
     canTranslate,
+    skipCodeBlocks,
     cachedLayout,
     onLayoutReady,
     onRequestPageTranslate,
@@ -726,14 +763,20 @@ const PdfPageRow: React.FC<PdfPageRowProps> = ({
                       }`}
                     >
                       {st?.status === 'error' ? (
-                        <button
-                          type="button"
-                          onClick={() => onRetranslateBlock(pageNumber, blk)}
-                          className="inline-flex items-center gap-1 rounded bg-red-50 px-2 py-0.5 font-sans text-xs text-red-700 ring-1 ring-red-200"
-                        >
-                          <RotateCcw size={11} />
-                          <span>翻译失败 · 点击重试</span>
-                        </button>
+                        <div className="space-y-1">
+                          <div className="opacity-85">{blk.text}</div>
+                          <div style={{ textIndent: 0 }}>
+                            <button
+                              type="button"
+                              onClick={() => onRetranslateBlock(pageNumber, blk)}
+                              title={st.error || '点击重新翻译此段'}
+                              className="inline-flex items-center gap-1 rounded bg-red-50 px-2 py-0.5 font-sans text-xs font-normal text-red-700 ring-1 ring-red-200 hover:bg-red-100"
+                            >
+                              <RotateCcw size={11} />
+                              <span>⚠ 译文获取失败（已保留原文）· 点击重试</span>
+                            </button>
+                          </div>
+                        </div>
                       ) : st?.text ? (
                         <>
                           <span>{st.text}</span>
@@ -809,7 +852,7 @@ export const App: React.FC = () => {
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const rawBytesRef = useRef<Uint8Array | null>(null);
-  const layoutCacheRef = useRef<Map<number, PdfPageLayout>>(new Map());
+  const layoutCacheRef = useRef<Map<string, PdfPageLayout>>(new Map());
   const requestedPagesRef = useRef<Set<string>>(new Set());
   const translationMemoryRef = useRef<
     Map<string, { text: string; serviceName: string }>
@@ -1060,7 +1103,7 @@ export const App: React.FC = () => {
     (pageNumber: number, blocks: PdfTextBlock[]) => {
       const curSettings = settingsRef.current;
       const activeService = resolvePrimaryService(curSettings);
-      const pageKey = `${ activeService.id }::${ curSettings.targetLang }::p${ pageNumber }`;
+      const pageKey = `${ activeService.id }::${ curSettings.targetLang }::sc${ curSettings.skipCodeBlocks ? 1 : 0 }::p${ pageNumber }`;
       if (requestedPagesRef.current.has(pageKey)) return;
       requestedPagesRef.current.add(pageKey);
       dispatchBlocksTranslation(pageNumber, blocks);
@@ -1076,23 +1119,27 @@ export const App: React.FC = () => {
   );
 
   const handleLayoutReady = useCallback(
-    (pageNumber: number, layout: PdfPageLayout) => {
-      layoutCacheRef.current.set(pageNumber, layout);
+    (pageNumber: number, layout: PdfPageLayout, skipCode: boolean) => {
+      layoutCacheRef.current.set(`${ pageNumber }:${ skipCode ? 1 : 0 }`, layout);
     },
     [],
   );
 
-  // Re-trigger already-hydrated pages when user switches target language or primary service
+  // Re-trigger already-hydrated pages when user switches target language, primary service, or code-block skipping
   const activeService = resolvePrimaryService(settings);
   useEffect(() => {
     if (sourceState !== 'ready' || !recognition?.hasRecognizableText) return;
     cancelAllInFlight();
     requestedPagesRef.current.clear();
 
-    for (const [pageNum, cached] of layoutCacheRef.current.entries()) {
+    const suffix = `:${ settings.skipCodeBlocks ? 1 : 0 }`;
+    for (const [cacheKey, cached] of layoutCacheRef.current.entries()) {
+      if (!cacheKey.endsWith(suffix)) continue;
+      const pageNum = Number.parseInt(cacheKey, 10);
+      if (Number.isNaN(pageNum)) continue;
       const translatable = cached.blocks.filter((b) => b.translatable);
       if (translatable.length > 0) {
-        const pageKey = `${ activeService.id }::${ settings.targetLang }::p${ pageNum }`;
+        const pageKey = `${ activeService.id }::${ settings.targetLang }::sc${ settings.skipCodeBlocks ? 1 : 0 }::p${ pageNum }`;
         requestedPagesRef.current.add(pageKey);
         dispatchBlocksTranslation(pageNum, translatable);
       }
@@ -1100,6 +1147,7 @@ export const App: React.FC = () => {
   }, [
     activeService.id,
     settings.targetLang,
+    settings.skipCodeBlocks,
     sourceState,
     recognition?.hasRecognizableText,
     cancelAllInFlight,
@@ -1390,32 +1438,51 @@ export const App: React.FC = () => {
         {sourceState === 'ready' && (
           <div className="hidden items-center gap-2 lg:flex">
             {canTranslate && (
-              <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+              <>
+                <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+                  <button
+                    type="button"
+                    onClick={() => setLayoutMode('replica')}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
+                      layoutMode === 'replica'
+                        ? 'bg-blue-600 text-white'
+                        : 'text-slate-600 hover:bg-slate-100 dark:text-zinc-400 dark:hover:bg-zinc-800'
+                    }`}
+                    title="保留原 PDF 图表、公式、分栏坐标与字体配色"
+                  >
+                    版式复刻
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLayoutMode('flow')}
+                    className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
+                      layoutMode === 'flow'
+                        ? 'bg-blue-600 text-white'
+                        : 'text-slate-600 hover:bg-slate-100 dark:text-zinc-400 dark:hover:bg-zinc-800'
+                    }`}
+                    title="按阅读顺序流式排版，保留标题字号与字重"
+                  >
+                    纯净流式
+                  </button>
+                </div>
+
                 <button
                   type="button"
-                  onClick={() => setLayoutMode('replica')}
-                  className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
-                    layoutMode === 'replica'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-600 hover:bg-slate-100 dark:text-zinc-400 dark:hover:bg-zinc-800'
+                  onClick={() =>
+                    patchSettings({ skipCodeBlocks: !settings.skipCodeBlocks })
+                  }
+                  aria-pressed={settings.skipCodeBlocks}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition ${
+                    settings.skipCodeBlocks
+                      ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/60 dark:text-blue-300'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800'
                   }`}
-                  title="保留原 PDF 图表、公式、分栏坐标与字体配色"
+                  title="开启时自动跳过论文与技术文档中的等宽代码块或代码清单；关闭后将一并翻译"
                 >
-                  版式复刻
+                  <Code2 size={12} />
+                  <span>跳过代码块</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setLayoutMode('flow')}
-                  className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition ${
-                    layoutMode === 'flow'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-600 hover:bg-slate-100 dark:text-zinc-400 dark:hover:bg-zinc-800'
-                  }`}
-                  title="按阅读顺序流式排版，保留标题字号与字重"
-                >
-                  纯净流式
-                </button>
-              </div>
+              </>
             )}
 
             <div className="flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white px-1 py-0.5 text-xs dark:border-zinc-700 dark:bg-zinc-900">
@@ -1693,9 +1760,12 @@ export const App: React.FC = () => {
                   targetPaneWidth={targetPaneWidth}
                   layoutMode={layoutMode}
                   canTranslate={canTranslate}
+                  skipCodeBlocks={settings.skipCodeBlocks}
                   forceActivate={translateAllActive}
                   pageTranslations={translations[pageNum] ?? {}}
-                  cachedLayout={layoutCacheRef.current.get(pageNum)}
+                  cachedLayout={layoutCacheRef.current.get(
+                    `${ pageNum }:${ settings.skipCodeBlocks ? 1 : 0 }`,
+                  )}
                   onLayoutReady={handleLayoutReady}
                   onRequestPageTranslate={handleRequestPageTranslate}
                   onRetranslateBlock={handleRetranslateBlock}

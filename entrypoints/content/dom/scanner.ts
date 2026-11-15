@@ -2,12 +2,13 @@ import type { SiteRule, TargetLanguageCode } from '../../../src/types';
 import {
   type CodeCommentMeta,
   discoverGitHubCommentElements,
-  isGitHubCodeHost,
+  isCodeCommentElement,
   parseCodeCommentText,
 } from './github-comments';
 import {
   BO_TRANS_TAG,
   BO_UI_HOST_TAG,
+  CORE_IGNORE_SELECTOR,
   DEFAULT_IGNORE_SELECTOR,
   findBuiltinDomainRule,
   HARD_NON_CONTENT_TAGS,
@@ -55,9 +56,14 @@ export function isBlockElement(el: Element): boolean {
 export function buildCombinedIgnoreSelector(
   hostname: string,
   siteRule?: SiteRule,
+  options?: { skipCodeBlocks?: boolean },
 ): string {
   const builtin = findBuiltinDomainRule(hostname);
-  const parts = [DEFAULT_IGNORE_SELECTOR];
+  const parts = [
+    options?.skipCodeBlocks === false
+      ? CORE_IGNORE_SELECTOR
+      : DEFAULT_IGNORE_SELECTOR,
+  ];
   if (builtin?.extraIgnoreSelector) {
     parts.push(builtin.extraIgnoreSelector);
   }
@@ -110,6 +116,8 @@ export interface ScanOptions {
   siteRule?: SiteRule;
   targetLang?: TargetLanguageCode;
   enableGithubComments?: boolean;
+  skipCodeBlocks?: boolean;
+  forceManualHover?: boolean;
 }
 
 /**
@@ -119,9 +127,11 @@ export function discoverCandidateElements(
   root: Element | Document,
   options: ScanOptions,
 ): HTMLElement[] {
+  const skipCodeBlocks = options.skipCodeBlocks ?? true;
   const ignoreSelector = buildCombinedIgnoreSelector(
     options.hostname,
     options.siteRule,
+    { skipCodeBlocks },
   );
   const builtin = findBuiltinDomainRule(options.hostname);
 
@@ -141,8 +151,8 @@ export function discoverCandidateElements(
     candidates.push(el);
   };
 
-  const appendGitHubCommentsIfEnabled = () => {
-    if (!options.enableGithubComments || !isGitHubCodeHost(options.hostname)) {
+  const appendCodeCommentsIfEnabled = () => {
+    if (!options.enableGithubComments) {
       return;
     }
     const commentEls = discoverGitHubCommentElements(root);
@@ -150,6 +160,31 @@ export function discoverCandidateElements(
       if (seen.has(commentEl)) continue;
       seen.add(commentEl);
       candidates.push(commentEl);
+    }
+  };
+
+  const appendPlainPreBlocksIfUnlocked = () => {
+    if (skipCodeBlocks) return;
+    const preCandidates: HTMLPreElement[] = [];
+    if (root instanceof HTMLPreElement) {
+      preCandidates.push(root);
+    }
+    if ('querySelectorAll' in root) {
+      preCandidates.push(...Array.from(root.querySelectorAll('pre')));
+    }
+    for (const preEl of preCandidates) {
+      if (seen.has(preEl)) continue;
+      if (isIgnoredElement(preEl, CORE_IGNORE_SELECTOR)) continue;
+      if (preEl.closest(CORE_IGNORE_SELECTOR)) continue;
+      if (preEl.closest('.blob-code, .react-code-lines')) continue;
+      if (
+        options.enableGithubComments &&
+        discoverGitHubCommentElements(preEl).length > 0
+      ) {
+        continue;
+      }
+      seen.add(preEl);
+      candidates.push(preEl);
     }
   };
 
@@ -162,7 +197,8 @@ export function discoverCandidateElements(
       for (const el of Array.from(matched)) {
         pushCandidate(el);
       }
-      appendGitHubCommentsIfEnabled();
+      appendCodeCommentsIfEnabled();
+      appendPlainPreBlocksIfUnlocked();
       return candidates;
     } catch {
       // Fall through to autoScan if selector is malformed
@@ -188,6 +224,7 @@ export function discoverCandidateElements(
   while (stack.length > 0) {
     const el = stack.pop()!;
     if (!(el instanceof HTMLElement)) continue;
+    if (el.tagName === 'PRE') continue;
     if (isIgnoredElement(el, ignoreSelector)) continue;
     if (isKeepInlineElement(el)) continue;
 
@@ -233,7 +270,8 @@ export function discoverCandidateElements(
     }
   }
 
-  appendGitHubCommentsIfEnabled();
+  appendCodeCommentsIfEnabled();
+  appendPlainPreBlocksIfUnlocked();
   return candidates;
 }
 
@@ -247,17 +285,19 @@ export function extractTranslatableSegmentsFromElement(
 ): DiscoveredSegment[] {
   const targetLang = options.targetLang ?? 'zh-CN';
 
-  // Special path: GitHub syntax-highlighted code comment span (`.pl-c`)
+  // Special path: syntax-highlighted single-line code comment spans
   if (
-    options.enableGithubComments &&
-    isGitHubCodeHost(options.hostname) &&
-    hostEl.classList.contains('pl-c') &&
-    !hostEl.parentElement?.closest('.pl-c')
+    (options.enableGithubComments || options.forceManualHover) &&
+    isCodeCommentElement(hostEl)
   ) {
     if (hostEl.querySelector(BO_TRANS_TAG)) {
       return [];
     }
-    const meta = parseCodeCommentText(hostEl.textContent ?? '', targetLang);
+    const meta = parseCodeCommentText(hostEl.textContent ?? '', targetLang, {
+      skipCodeLikeComments: options.forceManualHover
+        ? false
+        : (options.skipCodeBlocks ?? true),
+    });
     if (!meta) {
       return [];
     }
@@ -274,6 +314,45 @@ export function extractTranslatableSegmentsFromElement(
         },
         isShortInline: true,
         codeCommentMeta: meta,
+      },
+    ];
+  }
+
+  // Special path: plain / pseudo-code `<pre>` block when code-block skipping is unlocked or manually hovered
+  if (hostEl.tagName === 'PRE') {
+    if ((options.skipCodeBlocks ?? true) && !options.forceManualHover) {
+      return [];
+    }
+    const nextPreSib = hostEl.nextElementSibling;
+    if (
+      nextPreSib &&
+      nextPreSib.tagName === BO_TRANS_TAG.toUpperCase() &&
+      nextPreSib.getAttribute('data-bo-sibling') === 'true'
+    ) {
+      return [];
+    }
+    const raw = (hostEl.textContent ?? '').replace(/^\s*\n|\n\s*$/g, '');
+    const trimmed = raw.trim();
+    if (!trimmed || shouldSkipTextSegment(trimmed, 'PRE', targetLang)) {
+      return [];
+    }
+    const serializedText = raw
+      .split(/\r?\n/)
+      .map((l) => l.trimEnd())
+      .join('<br>')
+      .trim();
+    return [
+      {
+        hostEl,
+        nodes: Array.from(hostEl.childNodes),
+        serialized: {
+          serializedText,
+          translatablePlainText: trimmed,
+          fullPlainText: trimmed,
+          opaqueMap: new Map(),
+          wrapperMap: new Map(),
+        },
+        isShortInline: false,
       },
     ];
   }
@@ -408,6 +487,9 @@ export function findHoverTargetElement(
   const ignoreSelector = buildCombinedIgnoreSelector(
     options.hostname,
     options.siteRule,
+    {
+      skipCodeBlocks: options.forceManualHover ? false : options.skipCodeBlocks,
+    },
   );
 
   // If hovering inside an existing `<bo-trans>`, return its host element (either sibling or parent)!
@@ -424,26 +506,34 @@ export function findHoverTargetElement(
     }
   }
 
-  // Allow hovering over GitHub `.pl-c` comment spans when enabled
-  if (options.enableGithubComments && isGitHubCodeHost(options.hostname)) {
-    const commentSpan = el?.closest('.pl-c');
+  // Allow hovering over syntax-highlighted code comment spans when enabled or manually forced
+  if (options.enableGithubComments || options.forceManualHover) {
+    const commentSpan =
+      el?.closest('.pl-c, .token.comment, .hljs-comment, .c1, .cm, .cs') ??
+      (el && isCodeCommentElement(el) ? el : null);
     if (
       commentSpan instanceof HTMLElement &&
-      !commentSpan.parentElement?.closest('.pl-c')
+      isCodeCommentElement(commentSpan)
     ) {
-      const topComment = commentSpan;
       if (
-        topComment.querySelector(BO_TRANS_TAG) ||
-        extractTranslatableSegmentsFromElement(topComment, options).length > 0
+        commentSpan.querySelector(BO_TRANS_TAG) ||
+        extractTranslatableSegmentsFromElement(commentSpan, options).length > 0
       ) {
-        return topComment;
+        return commentSpan;
       }
     }
   }
 
   while (el && el !== document.body && el !== document.documentElement) {
     if (el.closest(BO_UI_HOST_TAG)) return null;
-    if (isIgnoredElement(el, ignoreSelector) && !isKeepInlineElement(el)) {
+    if (options.forceManualHover && el.tagName === 'PRE') {
+      if (
+        el.closest(CORE_IGNORE_SELECTOR) ||
+        el.closest('.blob-code, .react-code-lines')
+      ) {
+        return null;
+      }
+    } else if (isIgnoredElement(el, ignoreSelector) && !isKeepInlineElement(el)) {
       return null;
     }
 
@@ -454,6 +544,7 @@ export function findHoverTargetElement(
       el.tagName === 'LI' ||
       el.tagName === 'TD' ||
       el.tagName === 'TH' ||
+      el.tagName === 'PRE' ||
       /^H[1-6]$/.test(el.tagName)
     ) {
       // Check if it already has a `<bo-trans>` child or adjacent sibling

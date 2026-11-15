@@ -38,12 +38,15 @@ export const AboutTab: React.FC<AboutTabProps> = ({
 
   const version = useMemo(() => {
     try {
-      return chrome?.runtime?.getManifest?.()?.version || '0.2.0';
+      return chrome?.runtime?.getManifest?.()?.version || '0.2.1';
     } catch {
-      return '0.2.0';
+      return '0.2.1';
     }
   }, []);
 
+  const isEdge = import.meta.env.EDGE;
+  const browserLabel = isEdge ? 'Microsoft Edge' : 'Chrome';
+  const outDirLabel = isEdge ? 'dist/edge-mv3' : 'dist/chrome-mv3';
   const isUnlocked = settings.videoSubtitle.advancedTimelineUnlocked;
 
   const handleVersionClick = () => {
@@ -111,7 +114,7 @@ export const AboutTab: React.FC<AboutTabProps> = ({
                 )}
               </div>
               <p className="mt-1 text-xs text-slate-500 dark:text-zinc-400">
-                围绕同一次阅读与观看展开的 Chrome 沉浸式双语对照插件
+                围绕同一次阅读与观看展开的 {browserLabel} 沉浸式双语对照插件
               </p>
             </div>
           </div>
@@ -179,7 +182,7 @@ export const AboutTab: React.FC<AboutTabProps> = ({
           <li className="flex items-center gap-2">
             <CheckCircle2 size={13} className="shrink-0 text-emerald-500" />
             <span>
-              构建产物目录固定位于项目根下的 <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono dark:bg-zinc-800">dist/chrome-mv3</code>。
+              构建产物目录固定位于项目根下的 <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono dark:bg-zinc-800">{outDirLabel}</code>。
             </span>
           </li>
         </ul>

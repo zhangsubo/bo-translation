@@ -131,6 +131,7 @@ export interface ExtensionSettings {
   fontScale: number;
   showSelectionTriggerIcon: boolean;
   autoTranslateForeignPages: boolean;
+  skipCodeBlocks: boolean;
   enableGithubCommentTranslation: boolean;
   shortcuts: ShortcutConfig;
   floatingTab: FloatingTabConfig;

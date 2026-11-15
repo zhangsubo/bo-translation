@@ -51,6 +51,9 @@ export function shouldMountWrapperAsSibling(
   if (!parent || STRUCTURAL_PARENT_TAGS.has(parent.tagName)) {
     return false;
   }
+  if (hostEl.tagName === 'PRE') {
+    return true;
+  }
 
   // Explicit inline or utility classes common on modern blog cards (Tailwind `line-clamp-*`, `truncate`)
   const cls = typeof hostEl.className === 'string' ? hostEl.className : '';

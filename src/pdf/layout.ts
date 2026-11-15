@@ -49,6 +49,7 @@ export interface PdfTextBlock {
   align: PdfTextAlign;
   firstLineIndent: number;
   lineRects: PdfRect[];
+  isCodeBlock?: boolean;
   translatable: boolean;
   fgColor?: string;
   bgColor?: string;
@@ -239,6 +240,35 @@ export function isTranslatablePdfText(raw: string): boolean {
   return true;
 }
 
+const PDF_CODE_STATEMENT_RE =
+  /(?:^|\s)(?:def\s+\w+\s*\(|class\s+\w+[\s:{(]|function\s+\w*\s*\(|(?:const|let|var)\s+[\w${}[\]]+\s*=|import\s+(?:['"(]|[\w*{},\s]+from\s*['"]|[\w.*]+)|from\s+[\w.]+\s+import\b|#include\s*[<"]|pub\s+fn\s+\w+|(?:for|while)\s*\([^)]*;[^)]*\)|[$>#]\s+\S+)|=>|\breturn\s+[^.;\n]*;|[{}].*[{}]|\w+\([^)]*\)\s*[;{]/;
+
+/**
+ * Identifies code listings / algorithm blocks in PDFs while avoiding false positives
+ * on all-monospace documents (e.g. RFCs) and ordinary academic prose.
+ */
+export function isLikelyPdfCodeBlock(params: {
+  text: string;
+  fontFamily: PdfFontCategory;
+  lineCount: number;
+  isPredominantlyMonoPage?: boolean;
+}): boolean {
+  const trimmed = params.text.trim();
+  if (!trimmed) return false;
+  const nonWs = trimmed.replace(/\s+/g, '');
+  if (!nonWs) return false;
+
+  const punctCount = (nonWs.match(/[{}();=<>[\]\\|&$#@~^]/g) ?? []).length;
+  const punctRatio = punctCount / nonWs.length;
+  const hasCodeSyntax = PDF_CODE_STATEMENT_RE.test(trimmed);
+
+  if (params.fontFamily === 'monospace' && !params.isPredominantlyMonoPage) {
+    return params.lineCount >= 2 || hasCodeSyntax || punctRatio >= 0.08;
+  }
+
+  return hasCodeSyntax && punctRatio >= 0.06;
+}
+
 interface PositionedRun {
   str: string;
   x: number;
@@ -359,7 +389,9 @@ function sortBlocksInReadingOrder(
   const sortedByY = [...blocks].sort((a, b) => a.y - b.y || a.x - b.x);
   const isSpanning = (b: PdfTextBlock) =>
     b.width > pageWidth * 0.56 ||
-    (b.x < pageWidth * 0.42 && b.x + b.width > pageWidth * 0.58);
+    (b.x < pageWidth * 0.42 && b.x + b.width > pageWidth * 0.58) ||
+    (b.align === 'center' &&
+      Math.abs(b.x + b.width * 0.5 - pageWidth * 0.5) <= pageWidth * 0.055);
 
   const result: PdfTextBlock[] = [];
   let bucket: PdfTextBlock[] = [];
@@ -421,6 +453,7 @@ export function extractPageLayoutBlocks(params: {
   viewportScale: number;
   pageWidth: number;
   pageHeight: number;
+  skipCodeBlocks?: boolean;
   resolveFontMeta?: (fontName: string) => RawPdfFontMeta | undefined;
 }): PdfPageLayout {
   const {
@@ -430,6 +463,7 @@ export function extractPageLayoutBlocks(params: {
     viewportScale,
     pageWidth,
     pageHeight,
+    skipCodeBlocks = true,
     resolveFontMeta,
   } = params;
 
@@ -753,6 +787,15 @@ export function extractPageLayoutBlocks(params: {
   finishedParagraphs.push(...openParagraphs);
 
   // Step 4: Finalize PdfTextBlock objects with typography & alignment
+  let totalMonoChars = 0;
+  let totalPageChars = 0;
+  for (const p of finishedParagraphs) {
+    totalMonoChars += p.familyCounts.monospace;
+    totalPageChars += p.totalChars;
+  }
+  const isPredominantlyMonoPage =
+    totalPageChars > 0 && totalMonoChars / totalPageChars > 0.72;
+
   const rawBlocks: PdfTextBlock[] = finishedParagraphs.map((p, idx) => {
     const text = p.lines.reduce(
       (acc, l) => (acc ? joinLineStrings(acc, l.text) : l.text),
@@ -816,6 +859,13 @@ export function extractPageLayoutBlocks(params: {
       }
     }
 
+    const isCodeBlock = isLikelyPdfCodeBlock({
+      text,
+      fontFamily: dominantFamily,
+      lineCount: p.lines.length,
+      isPredominantlyMonoPage,
+    });
+
     return {
       id: idx + 1,
       text,
@@ -837,7 +887,8 @@ export function extractPageLayoutBlocks(params: {
         width: l.width,
         height: l.height,
       })),
-      translatable: isTranslatablePdfText(text),
+      isCodeBlock,
+      translatable: isTranslatablePdfText(text) && !(skipCodeBlocks && isCodeBlock),
     };
   });
 
@@ -949,4 +1000,94 @@ export function sampleBlockColorsFromCanvases(
     fgColor: `rgb(${ rFg }, ${ gFg }, ${ bFg })`,
     bgColor: `rgb(${ rBg }, ${ gBg }, ${ bBg })`,
   };
+}
+
+function parseRgbString(rgbStr?: string): [number, number, number] {
+  const m = rgbStr?.match(/rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/i);
+  if (!m) return [255, 255, 255];
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/**
+ * Clamps each block's `maxHeightBudget` before any non-background graphical obstacle
+ * (figures, diagrams, horizontal rules, box borders) present in the text-free `bgData` canvas.
+ */
+export function clampBlockBudgetsWithBackgroundObstacles(
+  blocks: PdfTextBlock[],
+  bgData: ImageData,
+  canvasScale: number,
+): boolean {
+  const w = bgData.width;
+  const h = bgData.height;
+  const bgPx = bgData.data;
+  if (w <= 0 || h <= 0 || canvasScale <= 0) return false;
+
+  let changed = false;
+
+  for (const blk of blocks) {
+    if (blk.maxHeightBudget <= blk.height + 4) continue;
+
+    const startPt = blk.y + blk.height + Math.max(3, blk.fontSize * 0.3);
+    const endPt = blk.y + blk.maxHeightBudget;
+    if (startPt >= endPt) continue;
+
+    const x0 = clamp(Math.floor(blk.x * canvasScale), 0, w - 1);
+    const x1 = clamp(Math.ceil((blk.x + blk.width) * canvasScale), 0, w - 1);
+    if (x1 <= x0) continue;
+
+    const y0 = clamp(Math.floor(startPt * canvasScale), 0, h - 1);
+    const y1 = clamp(Math.floor(endPt * canvasScale), 0, h - 1);
+    if (y1 <= y0) continue;
+
+    const [rBg, gBg, bBg] = parseRgbString(blk.bgColor);
+    const stepX = Math.max(1, Math.floor((x1 - x0) / 36));
+    const stepY = Math.max(1, Math.round(1.5 * canvasScale));
+
+    let consecutiveBusyRows = 0;
+    let firstBusyYPx: number | null = null;
+    let obstacleYPt: number | null = null;
+
+    for (let py = y0; py <= y1; py += stepY) {
+      let samples = 0;
+      let hits = 0;
+      for (let px = x0; px <= x1; px += stepX) {
+        const off = (py * w + px) * 4;
+        const diff =
+          Math.abs(bgPx[off]! - rBg) +
+          Math.abs(bgPx[off + 1]! - gBg) +
+          Math.abs(bgPx[off + 2]! - bBg);
+        samples++;
+        if (diff > 45) hits++;
+      }
+
+      const ratio = samples > 0 ? hits / samples : 0;
+      if (ratio >= 0.22) {
+        obstacleYPt = py / canvasScale;
+        break;
+      }
+      if (ratio >= 0.06) {
+        if (consecutiveBusyRows === 0) {
+          firstBusyYPx = py;
+        }
+        consecutiveBusyRows++;
+        if (consecutiveBusyRows >= 2) {
+          obstacleYPt = (firstBusyYPx ?? py) / canvasScale;
+          break;
+        }
+      } else {
+        consecutiveBusyRows = 0;
+        firstBusyYPx = null;
+      }
+    }
+
+    if (obstacleYPt !== null) {
+      const clamped = Math.max(blk.height, obstacleYPt - blk.y - 2);
+      if (clamped < blk.maxHeightBudget - 0.5) {
+        blk.maxHeightBudget = clamped;
+        changed = true;
+      }
+    }
+  }
+
+  return changed;
 }

@@ -63,6 +63,10 @@ export function normalizeSettings(
   return {
     ...DEFAULT_SETTINGS,
     ...raw,
+    skipCodeBlocks:
+      typeof raw.skipCodeBlocks === 'boolean'
+        ? raw.skipCodeBlocks
+        : DEFAULT_SETTINGS.skipCodeBlocks,
     primaryServiceId: primaryExists
       ? (raw.primaryServiceId as string)
       : fallbackPrimary,

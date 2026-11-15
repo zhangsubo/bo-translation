@@ -81,13 +81,29 @@ export const SiteRulesTab: React.FC<SiteRulesTabProps> = ({
           <label className="flex cursor-pointer items-center justify-between gap-4 py-3">
             <div>
               <div className="text-xs font-semibold">
-                GitHub 代码阅读视图行内注释翻译
+                自动跳过代码块与伪代码注释
               </div>
               <div className="mt-0.5 text-[11px] text-slate-500 dark:text-zinc-400">
-                在 <code className="font-mono">github.com</code> /{' '}
-                <code className="font-mono">gist.github.com</code>{' '}
-                查看源码或 Diff 时翻译 <code className="font-mono">.pl-c</code>{' '}
-                自然语言注释，自动过滤被注释掉的代码与 Linter 指令，严格保持左侧行号 1:1 对齐。
+                默认开启，跳过网页与 PDF 中的等宽代码块、代码清单及疑似被注释掉的代码；关闭后将放行，也可在网页按住悬停修饰键临时单独点译。
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={settings.skipCodeBlocks}
+              onChange={(e) =>
+                patchSettings({ skipCodeBlocks: e.target.checked })
+              }
+              className="h-4 w-4 shrink-0 rounded accent-blue-600"
+            />
+          </label>
+
+          <label className="flex cursor-pointer items-center justify-between gap-4 py-3">
+            <div>
+              <div className="text-xs font-semibold">
+                代码块行内注释翻译（GitHub 与技术文档）
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-500 dark:text-zinc-400">
+                在 GitHub 源码 / Diff 及支持 Prism、Highlight.js、Shiki 的技术文档代码块中提取自然语言注释并单行内联翻译，自动跳过编译指令与构建标记。
               </div>
             </div>
             <input
